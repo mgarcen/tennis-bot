@@ -112,6 +112,14 @@ async def main():
         await page.wait_for_load_state("networkidle")
         await screenshot(page, "03_tomorrow")
 
+        # ── 3b. SELECT SURFACE TYPE: LADRILLO ────────────────────────────────
+        print("3b. Selecting surface type LADRILLO …")
+        await page.locator("#vTIPOCANCHAID").select_option(label="LADRILLO")
+        await asyncio.sleep(1)
+        await page.wait_for_load_state("networkidle")
+        await screenshot(page, "03b_ladrillo_selected")
+        print("   ✔ Selected LADRILLO")
+
         # ── 4. FIND CANCHA 5 AT 19:00 AND CLICK RESERVAR ─────────────────────
         print(f"4️⃣  Looking for Cancha {COURT} at {HOUR} …")
         await asyncio.sleep(1)
