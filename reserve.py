@@ -91,11 +91,9 @@ async def main():
         await asyncio.sleep(1)
         await list_buttons(page)
 
-        result = await js_click_text(page, "sponibles")   # avoids accent issues
-        if not result:
-            await screenshot(page, "02_FAIL_dias_btn")
-            raise RuntimeError("❌ Could not find 'Días disponibles' button — check 02_FAIL_dias_btn.png")
-        print(f"   ✔ Clicked: '{result}'")
+        # Exact GeneXus button ID confirmed from page source
+        await page.locator("#BTNBTNRESERVAR").click()
+        print("   ✔ Clicked #BTNBTNRESERVAR (Días disponibles)")
 
         await asyncio.sleep(2)
         await page.wait_for_load_state("networkidle")
