@@ -15,7 +15,7 @@ TZ        = ZoneInfo("America/Montevideo")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def target_date() -> str:
-    """Returns tomorrow's date as DD/MM/YYYY (site format)."""
+    """Returns tomorrow's date as DD/MM/YYYY (site formaat)."""
     d = datetime.now(TZ) + timedelta(days=DAYS_AHEAD)
     return d.strftime("%d/%m/%Y")
 
@@ -43,95 +43,27 @@ async def main():
         await page.goto(f"{BASE_URL}/login.aspx", wait_until="networkidle")
         await screenshot(page, "01_login_page")
 
-        # Dump page HTML so we can inspect field IDs if login fails
-        html = await page.content()
-        os.makedirs("screenshots", exist_ok=True)
-        with open("screenshots/login_page_source.html", "w", encoding="utf-8") as f:
-            f.write(html)
-        print("   📄  Saved login page HTML to screenshots/login_page_source.html")
+        # Exact field IDs confirmed from page source (GeneXus AJAX app)
+        await page.fill("#vUSERNAME", USERNAME)
+        print("   ✔ username filled (#vUSERNAME)")
 
-        # Print all input fields found on the page
-        inputs = await page.locator("input").all()
-        print(f"   Found {len(inputs)} input field(s) on login page:")
-        for inp in inputs:
-            id_   = await inp.get_attribute("id") or ""
-            name  = await inp.get_attribute("name") or ""
-            type_ = await inp.get_attribute("type") or ""
-            ph    = await inp.get_attribute("placeholder") or ""
-            print(f"     • id='{id_}'  name='{name}'  type='{type_}'  placeholder='{ph}'")
+        await page.fill("#vUSERPASSWORD", PASSWORD)
+        print("   ✔ password filled (#vUSERPASSWORD)")
 
-        # Print all buttons found
-        buttons = await page.locator("button, input[type='submit']").all()
-        print(f"   Found {len(buttons)} button(s):")
-        for btn in buttons:
-            id_   = await btn.get_attribute("id") or ""
-            txt   = (await btn.inner_text()).strip()[:40]
-            val   = await btn.get_attribute("value") or ""
-            print(f"     • id='{id_}'  text='{txt}'  value='{val}'")
-
-        # Fill username — try multiple selector strategies
-        username_filled = False
-        for sel in [
-            "input[placeholder*='suario' i]",
-            "input[placeholder*='user' i]",
-            "#txtUsuario",
-            "input[name*='usuario' i]",
-            "input[name*='user' i]",
-            "input[id*='user' i]",
-            "input[id*='login' i]",
-            "input[type='text']",
-        ]:
-            try:
-                loc = page.locator(sel)
-                if await loc.count() > 0:
-                    await loc.first.fill(USERNAME)
-                    print(f"   ✔ username field: {sel}")
-                    username_filled = True
-                    break
-            except Exception:
-                continue
-
-        if not username_filled:
-            print("   ⚠️  Could not find username field — check login_page_source.html")
-
-        # Fill password
-        await page.fill("input[type='password']", PASSWORD)
-        print("   ✔ password field filled")
-
-        # Submit
-        submit_clicked = False
-        for sel in [
-            "button[type='submit']",
-            "input[type='submit']",
-            "button:has-text('Ingresar')",
-            "button:has-text('Login')",
-            "button:has-text('Entrar')",
-            "button:has-text('Acceder')",
-            "button",
-        ]:
-            try:
-                loc = page.locator(sel)
-                if await loc.count() > 0:
-                    await loc.first.click()
-                    print(f"   ✔ submit button: {sel}")
-                    submit_clicked = True
-                    break
-            except Exception:
-                continue
-
-        if not submit_clicked:
-            print("   ⚠️  Could not find submit button — check login_page_source.html")
+        # Login button is input[type="button"] — NOT a submit button
+        await page.click("#BTNENTER")
+        print("   ✔ login button clicked (#BTNENTER)")
 
         await page.wait_for_load_state("networkidle")
         await screenshot(page, "02_after_login")
 
         current = page.url
         if "login" in current.lower():
-            # Save post-attempt HTML too
+            os.makedirs("screenshots", exist_ok=True)
             html2 = await page.content()
             with open("screenshots/login_failed_source.html", "w", encoding="utf-8") as f:
                 f.write(html2)
-            raise RuntimeError("❌ Login failed — check screenshots/login_page_source.html for field IDs")
+            raise RuntimeError("❌ Login failed — credentials may be wrong or session was blocked.")
         print(f"   ✔ Logged in → {current}")
 
         # ── 2. NAVIGATE TO RESERVATIONS ───────────────────────────────────────
