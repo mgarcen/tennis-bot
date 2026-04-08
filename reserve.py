@@ -104,40 +104,9 @@ async def main():
         print("3️⃣  Navigating to tomorrow (clicking next arrow) …")
         await asyncio.sleep(1)
 
-        # Try JS-based approach for the next arrow
-        arrow_clicked = await page.evaluate("""() => {
-            // Try common arrow selectors
-            const selectors = [
-                '.glyphicon-chevron-right',
-                '.fa-chevron-right',
-                '.fa-arrow-right',
-                '[class*="next"]',
-                '[title*="iguiente"]',
-                '[aria-label*="iguiente"]',
-            ];
-            for (const sel of selectors) {
-                const el = document.querySelector(sel);
-                if (el && el.offsetParent !== null) {
-                    el.click();
-                    return sel;
-                }
-            }
-            // Fallback: find buttons with > or >> symbol
-            for (const el of document.querySelectorAll('button, a, span')) {
-                const t = el.textContent.trim();
-                if ((t === '>' || t === '>>' || t === '›' || t === '»') && el.offsetParent !== null) {
-                    el.click();
-                    return 'symbol:' + t;
-                }
-            }
-            return null;
-        }""")
-
-        if arrow_clicked:
-            print(f"   ✔ Arrow clicked via: {arrow_clicked}")
-        else:
-            await screenshot(page, "03_FAIL_arrow")
-            raise RuntimeError("❌ Could not find next-day arrow — check 03_FAIL_arrow.png")
+        # Exact GeneXus button ID confirmed
+        await page.locator("#BTNBTNSIGUIENTE").click()
+        print("   ✔ Clicked #BTNBTNSIGUIENTE (next day)")
 
         await asyncio.sleep(2)
         await page.wait_for_load_state("networkidle")
