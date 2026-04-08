@@ -25,13 +25,15 @@ async def screenshot(page, name):
     print(f"  📸  {name}.png")
 
 async def js_click_text(page, text):
-    """Click any visible element whose text contains `text` (JS-based, no encoding issues)."""
+    """Click any element whose text contains `text` — no offsetParent check (GeneXus compat)."""
     clicked = await page.evaluate(f"""() => {{
-        const all = document.querySelectorAll('button, a, input[type=button], input[type=submit]');
+        // Search ALL elements, not just buttons — GeneXus uses divs/spans as clickable items
+        const all = document.querySelectorAll('*');
         for (const el of all) {{
-            if (el.offsetParent !== null && el.textContent.trim().includes('{text}')) {{
+            const t = el.textContent.trim();
+            if (t.includes('{text}') && t.length < 60) {{
                 el.click();
-                return el.textContent.trim();
+                return t;
             }}
         }}
         return null;
@@ -39,14 +41,12 @@ async def js_click_text(page, text):
     return clicked
 
 async def list_buttons(page):
-    """Print all visible buttons — helpful for debugging."""
+    """Print ALL clickable-looking elements — helpful for debugging."""
     btns = await page.evaluate("""() => {
-        const all = document.querySelectorAll('button, a.btn, input[type=button], input[type=submit]');
-        return Array.from(all)
-            .filter(el => el.offsetParent !== null)
-            .map(el => el.textContent.trim().substring(0, 60));
+        const all = document.querySelectorAll('button, a, input[type=button], input[type=submit], [onclick], [data-gx-evt]');
+        return Array.from(all).map(el => (el.tagName + '|' + el.textContent.trim().substring(0, 50)));
     }""")
-    print("   Visible buttons:", btns)
+    print("   Clickable elements:", btns)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 async def main():
