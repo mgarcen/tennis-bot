@@ -4,14 +4,15 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
-# ── Config (injected via env vars in GitHub Actions) ──────────────────────────
-BASE_URL  = "https://agenbot.net/deporyatenis"
-USERNAME  = os.environ["TENNIS_USER"]
-PASSWORD  = os.environ["TENNIS_PASS"]
-COURT     = "5"          # Court number to reserve
-HOUR      = "19:00"      # 7 PM  (19:00 in 24h)
-DAYS_AHEAD = 1           # Book 1 day from today
-TZ        = ZoneInfo("America/Montevideo")
+# ── Config ────────────────────────────────────────────────────────────────────
+BASE_URL   = "https://agenbot.net/deporyatenis"
+USERNAME   = os.environ["TENNIS_USER"]
+PASSWORD   = os.environ["TENNIS_PASS"]
+COURT      = "5"
+HOUR       = "12:00"
+DAYS_AHEAD = 1
+PARTNER    = "Kevin Monzon"
+TZ         = ZoneInfo("America/Montevideo")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def target_date() -> str:
@@ -40,143 +41,189 @@ async def main():
         # ── 1. LOGIN ──────────────────────────────────────────────────────────
         print("1️⃣  Logging in …")
         await page.goto(f"{BASE_URL}/login.aspx", wait_until="networkidle")
-        await screenshot(page, "01_login_page")
 
-        # GeneXus apps need type() with delay — fill() bypasses JS event handlers
         await page.locator("#vUSERNAME").click()
         await page.locator("#vUSERNAME").type(USERNAME, delay=100)
         await page.locator("#vUSERNAME").press("Tab")
-        print("   ✔ username typed")
-
         await asyncio.sleep(0.5)
 
         await page.locator("#vUSERPASSWORD").click()
         await page.locator("#vUSERPASSWORD").type(PASSWORD, delay=100)
         await page.locator("#vUSERPASSWORD").press("Tab")
-        print("   ✔ password typed")
-
         await asyncio.sleep(1)
 
-        # Click login and wait for navigation away from login page
         try:
             async with page.expect_navigation(timeout=20000):
                 await page.locator("#BTNENTER").click()
-            print("   ✔ navigation detected after login")
         except PlaywrightTimeout:
-            print("   ⚠ No full navigation — checking URL anyway")
+            pass
 
         await asyncio.sleep(2)
         await page.wait_for_load_state("networkidle")
-        await screenshot(page, "02_after_login")
+        await screenshot(page, "01_after_login")
 
-        current = page.url
-        print(f"   Current URL: {current}")
+        if "login" in page.url.lower():
+            raise RuntimeError("❌ Login failed")
+        print(f"   ✔ Logged in → {page.url}")
 
-        if "login" in current.lower():
-            err_text = ""
-            for err_sel in [".ErrorViewer", ".gx_ev", "[class*='error' i]"]:
-                try:
-                    loc = page.locator(err_sel)
-                    if await loc.count() > 0:
-                        err_text = await loc.first.inner_text()
-                        if err_text.strip():
+        # ── 2. CLICK "DÍAS DISPONIBLES" ───────────────────────────────────────
+        print("2️⃣  Clicking 'Días disponibles' …")
+        await page.wait_for_load_state("networkidle")
+        dias_btn = page.locator("button:has-text('Días disponibles'), a:has-text('Días disponibles')")
+        await dias_btn.wait_for(timeout=10000)
+        await dias_btn.click()
+        await page.wait_for_load_state("networkidle")
+        await asyncio.sleep(1)
+        await screenshot(page, "02_dias_disponibles")
+        print(f"   ✔ Clicked → {page.url}")
+
+        # ── 3. NAVIGATE TO TOMORROW ───────────────────────────────────────────
+        print("3️⃣  Navigating to tomorrow …")
+
+        # The page shows a date with prev/next arrows — click the next (>) arrow
+        next_arrow = page.locator(
+            "button[title*='siguiente' i], "
+            "button[title*='next' i], "
+            "button[aria-label*='siguiente' i], "
+            "button[aria-label*='next' i], "
+            "a[title*='siguiente' i], "
+            "[class*='next' i]:not(input):not(select), "
+            "span.glyphicon-chevron-right, "
+            "i.fa-chevron-right, "
+            "i.fa-arrow-right"
+        ).first
+
+        await next_arrow.wait_for(timeout=10000)
+        await next_arrow.click()
+        await page.wait_for_load_state("networkidle")
+        await asyncio.sleep(1)
+        await screenshot(page, "03_tomorrow")
+        print("   ✔ Navigated to next day")
+
+        # ── 4. FIND CANCHA 5 AT 19:00 AND CLICK RESERVAR ─────────────────────
+        print(f"4️⃣  Looking for Cancha {COURT} at {HOUR} …")
+        await screenshot(page, "04_schedule_view")
+
+        # Strategy: find a row/cell that contains both the hour and cancha number,
+        # then click its "Reservar" button
+        # Common patterns in DeporYA:
+        #   - A table where rows = hours, columns = canchas
+        #   - Or rows = canchas, columns = hours
+
+        # Try to find a reservar button near "19:00" AND "5" or "Cancha 5"
+        # First try: find cell/button with both references nearby
+        hour_variants  = ["19:00", "19:00 hs", "19 hs", "19h", "7:00 PM"]
+        court_variants = [f"Cancha {COURT}", f"cancha{COURT}", f"Court {COURT}", COURT]
+
+        clicked = False
+
+        # Approach 1: look for a row containing the hour, then find Reservar in that row
+        for hv in hour_variants:
+            rows = page.locator(f"tr:has-text('{hv}'), div[class*='row']:has-text('{hv}')")
+            count = await rows.count()
+            if count > 0:
+                print(f"   Found {count} row(s) with '{hv}'")
+                for i in range(count):
+                    row = rows.nth(i)
+                    row_text = await row.inner_text()
+                    # Check if this row mentions court 5
+                    if any(cv.lower() in row_text.lower() for cv in court_variants) or count == 1:
+                        reservar = row.locator(
+                            "button:has-text('Reservar'), "
+                            "a:has-text('Reservar'), "
+                            "input[value*='Reservar' i]"
+                        ).first
+                        if await reservar.count() > 0:
+                            await reservar.click()
+                            await page.wait_for_load_state("networkidle")
+                            await asyncio.sleep(1)
+                            await screenshot(page, "05_reservar_clicked")
+                            print(f"   ✔ Clicked Reservar in row with '{hv}'")
+                            clicked = True
                             break
-                except Exception:
-                    pass
-            os.makedirs("screenshots", exist_ok=True)
-            html2 = await page.content()
-            with open("screenshots/login_failed_source.html", "w", encoding="utf-8") as f:
-                f.write(html2)
-            raise RuntimeError(f"❌ Login failed. Site message: '{err_text.strip()}'")
-
-        print(f"   ✔ Logged in → {current}")
-
-        # ── 2. NAVIGATE TO RESERVATIONS ───────────────────────────────────────
-        print("2️⃣  Looking for reservation section …")
-        await screenshot(page, "03_home")
-
-        for text in ["Reservar", "Reservas", "Canchas", "Turnos", "Booking", "Courts"]:
-            loc = page.locator(f"a:has-text('{text}'), button:has-text('{text}')")
-            if await loc.count() > 0:
-                await loc.first.click()
-                await page.wait_for_load_state("networkidle")
-                print(f"   ✔ Clicked nav link: '{text}'")
-                await screenshot(page, "04_reservations_page")
-                break
-
-        # ── 3. SELECT DATE ────────────────────────────────────────────────────
-        print(f"3️⃣  Selecting date {date_str} …")
-
-        for sel in [
-            "input[type='date']",
-            "input[placeholder*='fecha' i]",
-            "input[id*='date' i]",
-            "input[id*='fecha' i]",
-        ]:
-            try:
-                loc = page.locator(sel)
-                if await loc.count() > 0:
-                    d = datetime.now(TZ) + timedelta(days=DAYS_AHEAD)
-                    await loc.fill(d.strftime("%Y-%m-%d"))
-                    print(f"   ✔ date input: {sel}")
-                    await page.wait_for_load_state("networkidle")
-                    await screenshot(page, "05_date_selected")
+                if clicked:
                     break
-            except Exception:
-                continue
 
-        try:
-            d = datetime.now(TZ) + timedelta(days=DAYS_AHEAD)
-            day_num = str(d.day)
-            cal_day = page.locator(
-                f"td:has-text('{day_num}'), div[class*='day']:has-text('{day_num}')"
-            ).first
-            if await cal_day.is_visible():
-                await cal_day.click()
-                print(f"   ✔ Clicked calendar day {day_num}")
-                await page.wait_for_load_state("networkidle")
-                await screenshot(page, "05_date_selected")
-        except Exception:
-            pass
+        # Approach 2: find a cell/link that contains the hour text and click Reservar nearby
+        if not clicked:
+            print("   Trying approach 2: locate hour cell then nearby Reservar …")
+            for hv in hour_variants:
+                hour_cell = page.locator(f"td:has-text('{hv}'), span:has-text('{hv}')").first
+                if await hour_cell.count() > 0:
+                    # Walk up to parent row/container
+                    parent = hour_cell.locator("xpath=ancestor::tr[1]")
+                    if await parent.count() == 0:
+                        parent = hour_cell.locator("xpath=ancestor::div[contains(@class,'row')][1]")
+                    reservar = parent.locator(
+                        "button:has-text('Reservar'), a:has-text('Reservar')"
+                    ).first
+                    if await reservar.count() > 0:
+                        await reservar.click()
+                        await page.wait_for_load_state("networkidle")
+                        await asyncio.sleep(1)
+                        await screenshot(page, "05_reservar_clicked")
+                        print(f"   ✔ Clicked Reservar via hour cell '{hv}'")
+                        clicked = True
+                        break
 
-        # ── 4. SELECT COURT 5 ─────────────────────────────────────────────────
-        print(f"4️⃣  Selecting Court {COURT} …")
+        if not clicked:
+            await screenshot(page, "05_reservar_NOT_found")
+            raise RuntimeError(
+                f"❌ Could not find Reservar button for Court {COURT} at {HOUR}. "
+                "Check screenshot 04_schedule_view.png to see the page layout."
+            )
+
+        # ── 5. SEARCH FOR PARTNER ─────────────────────────────────────────────
+        print(f"5️⃣  Searching for partner: {PARTNER} …")
+        await screenshot(page, "06_before_buscar")
+
+        # Fill the search/partner field
+        search_filled = False
         for sel in [
-            f"*:has-text('Cancha {COURT}')",
-            f"*:has-text('Court {COURT}')",
-            f"option[value='{COURT}']",
+            "input[placeholder*='buscar' i]",
+            "input[placeholder*='nombre' i]",
+            "input[placeholder*='jugador' i]",
+            "input[placeholder*='socio' i]",
+            "input[type='search']",
+            "input[type='text']",
         ]:
             try:
                 loc = page.locator(sel).first
-                if await loc.count() > 0:
-                    tag = await loc.evaluate("el => el.tagName.toLowerCase()")
-                    if tag == "option":
-                        select = page.locator(f"select:has(option[value='{COURT}'])")
-                        await select.select_option(value=COURT)
-                    else:
-                        await loc.click()
-                    print(f"   ✔ Court selector: {sel}")
-                    await page.wait_for_load_state("networkidle")
-                    await screenshot(page, "06_court_selected")
+                if await loc.is_visible(timeout=3000):
+                    await loc.click()
+                    await loc.type(PARTNER, delay=80)
+                    print(f"   ✔ Typed partner name in {sel}")
+                    search_filled = True
                     break
             except Exception:
                 continue
 
-        # ── 5. SELECT TIME SLOT 19:00 ─────────────────────────────────────────
-        print(f"5️⃣  Selecting time slot {HOUR} …")
-        for variant in [HOUR, "19:00 hs", "7:00 PM", "7 PM", "19 hs"]:
-            try:
-                loc = page.locator(
-                    f"*:has-text('{variant}'):not(html):not(body)"
-                ).first
-                if await loc.is_visible(timeout=2000):
-                    await loc.click()
-                    print(f"   ✔ Time slot clicked: '{variant}'")
-                    await page.wait_for_load_state("networkidle")
-                    await screenshot(page, "07_time_selected")
-                    break
-            except Exception:
-                continue
+        await asyncio.sleep(0.5)
+
+        # Click "Buscar"
+        buscar = page.locator(
+            "button:has-text('Buscar'), "
+            "input[value='Buscar'], "
+            "a:has-text('Buscar')"
+        ).first
+        await buscar.wait_for(timeout=8000)
+        await buscar.click()
+        await page.wait_for_load_state("networkidle")
+        await asyncio.sleep(1)
+        await screenshot(page, "07_search_results")
+        print("   ✔ Clicked Buscar")
+
+        # Select Kevin Monzon from results
+        result = page.locator(
+            f"*:has-text('{PARTNER}')"
+            ":not(html):not(body):not(script)"
+        ).first
+        await result.wait_for(timeout=8000)
+        await result.click()
+        await page.wait_for_load_state("networkidle")
+        await asyncio.sleep(1)
+        await screenshot(page, "08_partner_selected")
+        print(f"   ✔ Selected {PARTNER}")
 
         # ── 6. CONFIRM RESERVATION ────────────────────────────────────────────
         print("6️⃣  Confirming reservation …")
@@ -184,22 +231,24 @@ async def main():
             "button:has-text('Confirmar')",
             "button:has-text('Reservar')",
             "button:has-text('Aceptar')",
-            "input[value*='onfirm' i]",
-            "input[value*='eserv' i]",
+            "input[value*='Confirm' i]",
+            "input[value*='Reserv' i]",
+            "input[value*='Aceptar' i]",
         ]:
             try:
                 loc = page.locator(sel).first
-                if await loc.is_visible(timeout=3000):
+                if await loc.is_visible(timeout=4000):
                     await loc.click()
-                    print(f"   ✔ Confirm button: {sel}")
                     await page.wait_for_load_state("networkidle")
-                    await screenshot(page, "08_confirmed")
+                    await asyncio.sleep(1)
+                    await screenshot(page, "09_confirmed")
+                    print(f"   ✔ Confirmed via {sel}")
                     break
             except Exception:
                 continue
 
-        await screenshot(page, "09_final_state")
-        print(f"\n✅  Done! Court {COURT} on {date_str} at {HOUR}")
+        await screenshot(page, "10_final_state")
+        print(f"\n✅  Done! Court {COURT} on {date_str} at {HOUR} with {PARTNER}")
         await browser.close()
 
 
