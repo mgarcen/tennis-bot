@@ -110,7 +110,15 @@ async def main():
         print("   ✔ Selected LADRILLO — waiting for grid to reload …")
         await asyncio.sleep(3)
         await page.wait_for_load_state("networkidle")
-        await screenshot(page, "03b_ladrillo_selected")
+
+        # Also filter by CANCHA 5 to narrow the grid
+        cancha_sel = page.locator("#vCANCHAID, select[id*='ANCHA' i]").first
+        if await cancha_sel.count() > 0:
+            await cancha_sel.select_option(label="CANCHA5")
+            await asyncio.sleep(2)
+            await page.wait_for_load_state("networkidle")
+            print("   ✔ Filtered to CANCHA5")
+        await screenshot(page, "03b_filters_set")
 
         # Now navigate to tomorrow AFTER filter is set
         await page.locator("#BTNBTNSIGUIENTE").click()
@@ -159,20 +167,46 @@ async def main():
             await screenshot(page, "04_FAIL_reservar")
             raise RuntimeError(f"❌ No row found with hour={HOUR} court={COURT} — check 04_FAIL_reservar.png")
 
-        await asyncio.sleep(2)
-        await page.wait_for_load_state("networkidle")
+        # Wait for modal/overlay to appear after Reservar click
+        await asyncio.sleep(3)
         await screenshot(page, "05_after_reservar")
+        print(f"   URL after reservar: {page.url}")
 
         # ── 5. BUSCAR + SELECT KEVIN MONZON ───────────────────────────────────
         print(f"5️⃣  Searching for {PARTNER} …")
-        await asyncio.sleep(1)
-        await screenshot(page, "06_before_search")
 
-        # Type in the search box
-        search_box = page.locator("input[type='text'], input[type='search']").first
-        await search_box.wait_for(timeout=8000)
+        # The search field might be inside a modal — wait for ANY visible text input
+        search_box = None
+        for sel in [
+            "input[type='text']:visible",
+            "input[id*='NOMBRE' i]",
+            "input[id*='JUGADOR' i]",
+            "input[id*='SOCIO' i]",
+            "input[id*='BUSCAR' i]",
+            "input[maxlength='40']:not([disabled])",
+        ]:
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible(timeout=3000):
+                    search_box = loc
+                    print(f"   ✔ Found search input: {sel}")
+                    break
+            except Exception:
+                continue
+
+        if not search_box:
+            await screenshot(page, "05_FAIL_no_search_box")
+            # Print all inputs on page for debugging
+            inputs = await page.evaluate("""() => {
+                return [...document.querySelectorAll('input')].map(i =>
+                    i.id + '|' + i.type + '|' + i.name + '|visible:' + (i.offsetParent !== null)
+                );
+            }""")
+            print("   All inputs:", inputs)
+            raise RuntimeError("❌ Could not find search box — check 05_FAIL_no_search_box.png")
+
         await search_box.click()
-        await search_box.type(PARTNER.split()[0], delay=80)   # type first name
+        await search_box.type(PARTNER.split()[0], delay=80)
         print(f"   ✔ Typed search term")
 
         # Click Buscar
