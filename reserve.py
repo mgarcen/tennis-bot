@@ -125,51 +125,40 @@ async def main():
         await asyncio.sleep(1)
         await screenshot(page, "04_schedule")
 
-        # JS: find a Reservar button in the same row/cell as both "19" and "5"
-        reservar_clicked = await page.evaluate(f"""() => {{
-            const hourTexts  = ['19:00', '19:00 hs', '19 hs', '19h'];
-            const courtTexts = ['Cancha 5', 'cancha5', 'Court 5', 'CANCHA 5'];
+        # Dynamically find the row containing HOUR and COURT, then click its Reservar button
+        row_selector = "[id*='Gridsdthorasdeldia_horassContainerRow']"
+        await page.locator(row_selector).first.wait_for(timeout=10000)
 
-            // Try: find row containing the hour, then find Reservar in it
-            const rows = document.querySelectorAll('tr, [class*="row"], [class*="slot"], [class*="turno"]');
-            for (const row of rows) {{
-                const text = row.textContent;
-                const hasHour  = hourTexts.some(h => text.includes(h));
-                const hasCourt = courtTexts.some(c => text.includes(c));
-                if (hasHour && hasCourt) {{
-                    const btn = row.querySelector('button, a, input[type=button]');
-                    if (btn && btn.offsetParent !== null) {{
-                        btn.click();
-                        return 'row match: ' + text.substring(0, 80);
-                    }}
-                }}
-            }}
+        rows = page.locator(row_selector)
+        row_count = await rows.count()
+        print(f"   Found {row_count} grid rows")
 
-            // Fallback: find any element containing the hour, walk up, click Reservar
-            for (const hourText of hourTexts) {{
-                const els = [...document.querySelectorAll('td, span, div')];
-                const hourEl = els.find(el => el.textContent.trim() === hourText && el.offsetParent !== null);
-                if (hourEl) {{
-                    let parent = hourEl.parentElement;
-                    for (let i = 0; i < 5; i++) {{
-                        if (!parent) break;
-                        const btn = parent.querySelector('button, a[href], input[type=button]');
-                        if (btn && btn.offsetParent !== null) {{
-                            btn.click();
-                            return 'hour fallback: ' + hourText;
-                        }}
-                        parent = parent.parentElement;
-                    }}
-                }}
-            }}
-            return null;
-        }}""")
+        clicked = False
+        for i in range(row_count):
+            row = rows.nth(i)
+            text = await row.inner_text()
+            if HOUR in text and COURT in text:
+                reservar_btn = row.locator("button, a, input[type=button], input[type=submit]").first
+                await reservar_btn.click()
+                print(f"   ✔ Clicked Reservar in row {i} — matched '{HOUR}' + 'Cancha {COURT}'")
+                clicked = True
+                break
 
-        if reservar_clicked:
-            print(f"   ✔ Reservar clicked: {reservar_clicked}")
-        else:
+        if not clicked:
+            # Fallback: match by hour only (in case court label differs)
+            for i in range(row_count):
+                row = rows.nth(i)
+                text = await row.inner_text()
+                if HOUR in text:
+                    reservar_btn = row.locator("button, a, input[type=button], input[type=submit]").first
+                    await reservar_btn.click()
+                    print(f"   ✔ Clicked Reservar in row {i} — matched '{HOUR}' only")
+                    clicked = True
+                    break
+
+        if not clicked:
             await screenshot(page, "04_FAIL_reservar")
-            raise RuntimeError("❌ Could not find Reservar for Court 5 at 19:00 — check 04_FAIL_reservar.png and 04_schedule.png")
+            raise RuntimeError(f"❌ No row found with hour={HOUR} court={COURT} — check 04_FAIL_reservar.png")
 
         await asyncio.sleep(2)
         await page.wait_for_load_state("networkidle")
