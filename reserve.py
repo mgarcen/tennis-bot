@@ -111,14 +111,7 @@ async def main():
         await asyncio.sleep(3)
         await page.wait_for_load_state("networkidle")
 
-        # Also filter by CANCHA 5 to narrow the grid
-        cancha_sel = page.locator("#vCANCHAID, select[id*='ANCHA' i]").first
-        if await cancha_sel.count() > 0:
-            await cancha_sel.select_option(label="CANCHA5")
-            await asyncio.sleep(2)
-            await page.wait_for_load_state("networkidle")
-            print("   ✔ Filtered to CANCHA5")
-        await screenshot(page, "03b_filters_set")
+        await screenshot(page, "03b_ladrillo_set")
 
         # Now navigate to tomorrow AFTER filter is set
         await page.locator("#BTNBTNSIGUIENTE").click()
