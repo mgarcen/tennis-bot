@@ -104,21 +104,20 @@ async def main():
         print("3️⃣  Navigating to tomorrow (clicking next arrow) …")
         await asyncio.sleep(1)
 
-        # Exact GeneXus button ID confirmed
+        # Select LADRILLO first — doing it after next-arrow resets the date
+        print("3b. Selecting surface type LADRILLO …")
+        await page.locator("#vTIPOCANCHAID").select_option(label="LADRILLO")
+        print("   ✔ Selected LADRILLO — waiting for grid to reload …")
+        await asyncio.sleep(3)
+        await page.wait_for_load_state("networkidle")
+        await screenshot(page, "03b_ladrillo_selected")
+
+        # Now navigate to tomorrow AFTER filter is set
         await page.locator("#BTNBTNSIGUIENTE").click()
         print("   ✔ Clicked #BTNBTNSIGUIENTE (next day)")
-
         await asyncio.sleep(2)
         await page.wait_for_load_state("networkidle")
         await screenshot(page, "03_tomorrow")
-
-        # ── 3b. SELECT SURFACE TYPE: LADRILLO ────────────────────────────────
-        print("3b. Selecting surface type LADRILLO …")
-        await page.locator("#vTIPOCANCHAID").select_option(label="LADRILLO")
-        await asyncio.sleep(1)
-        await page.wait_for_load_state("networkidle")
-        await screenshot(page, "03b_ladrillo_selected")
-        print("   ✔ Selected LADRILLO")
 
         # ── 4. FIND CANCHA 5 AT 19:00 AND CLICK RESERVAR ─────────────────────
         print(f"4️⃣  Looking for Cancha {COURT} at {HOUR} …")
