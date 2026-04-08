@@ -173,17 +173,28 @@ async def main():
         print(f"   URL after reservar: {page.url}")
 
         # ── 5. BUSCAR + SELECT KEVIN MONZON ───────────────────────────────────
+        # We are now on the RESERVA CANCHA page (HORA ACTUAL)
+        # Flow: click Buscar → search input appears → type name → select → Confirmar
         print(f"5️⃣  Searching for {PARTNER} …")
+        await screenshot(page, "06_reserva_cancha_page")
 
-        # The search field might be inside a modal — wait for ANY visible text input
+        # Click Buscar first — this reveals the search input
+        buscar_btn = page.locator("button:has-text('Buscar'), input[value='Buscar']").first
+        await buscar_btn.wait_for(timeout=8000)
+        await buscar_btn.click()
+        print("   ✔ Clicked Buscar")
+        await asyncio.sleep(2)
+        await page.wait_for_load_state("networkidle")
+        await screenshot(page, "07_after_buscar")
+
+        # Now type in search box
         search_box = None
         for sel in [
-            "input[type='text']:visible",
-            "input[id*='NOMBRE' i]",
-            "input[id*='JUGADOR' i]",
-            "input[id*='SOCIO' i]",
-            "input[id*='BUSCAR' i]",
             "input[maxlength='40']:not([disabled])",
+            "input[id*='NOMBRE' i]:not([disabled])",
+            "input[id*='JUGADOR' i]:not([disabled])",
+            "input[id*='SOCIO' i]:not([disabled])",
+            "input[type='text']:not([disabled])",
         ]:
             try:
                 loc = page.locator(sel).first
@@ -194,51 +205,38 @@ async def main():
             except Exception:
                 continue
 
-        if not search_box:
-            await screenshot(page, "05_FAIL_no_search_box")
-            # Print all inputs on page for debugging
-            inputs = await page.evaluate("""() => {
-                return [...document.querySelectorAll('input')].map(i =>
-                    i.id + '|' + i.type + '|' + i.name + '|visible:' + (i.offsetParent !== null)
-                );
-            }""")
-            print("   All inputs:", inputs)
-            raise RuntimeError("❌ Could not find search box — check 05_FAIL_no_search_box.png")
+        if search_box:
+            await search_box.click()
+            await search_box.type(PARTNER.split()[0], delay=80)
+            print(f"   ✔ Typed '{PARTNER.split()[0]}'")
+            await asyncio.sleep(0.5)
+            # Click Buscar again to trigger the search
+            await buscar_btn.click()
+            await asyncio.sleep(2)
+            await page.wait_for_load_state("networkidle")
+            await screenshot(page, "08_search_results")
 
-        await search_box.click()
-        await search_box.type(PARTNER.split()[0], delay=80)
-        print(f"   ✔ Typed search term")
-
-        # Click Buscar
-        result2 = await js_click_text(page, "Buscar")
-        if not result2:
-            raise RuntimeError("❌ Could not find Buscar button")
-        print(f"   ✔ Clicked Buscar")
-
-        await asyncio.sleep(2)
-        await page.wait_for_load_state("networkidle")
-        await screenshot(page, "07_search_results")
-
-        # Click Kevin Monzon in results
-        partner_el = page.locator(f"*:has-text('{PARTNER}'):not(html):not(body):not(head)").first
+        # Select Kevin Monzon from results
+        partner_el = page.locator(
+            f"tr:has-text('{PARTNER}'), td:has-text('{PARTNER}')"
+        ).first
         await partner_el.wait_for(timeout=8000)
         await partner_el.click()
         print(f"   ✔ Selected {PARTNER}")
-
         await asyncio.sleep(1)
         await page.wait_for_load_state("networkidle")
-        await screenshot(page, "08_partner_selected")
+        await screenshot(page, "09_partner_selected")
 
         # ── 6. CONFIRM ────────────────────────────────────────────────────────
         print("6️⃣  Confirming …")
-        confirmed = await js_click_text(page, "Confirmar") or \
-                    await js_click_text(page, "Reservar")  or \
-                    await js_click_text(page, "Aceptar")
-        if confirmed:
-            print(f"   ✔ Confirmed via: '{confirmed}'")
+        confirmar = page.locator("button:has-text('Confirmar'), input[value='Confirmar']").first
+        await confirmar.wait_for(timeout=8000)
+        await confirmar.click()
+        print("   ✔ Clicked Confirmar")
         await asyncio.sleep(2)
         await page.wait_for_load_state("networkidle")
-        await screenshot(page, "09_final")
+        await screenshot(page, "10_final")
+
 
         print(f"\n✅  Done! Court {COURT} on {date_str} at {HOUR} with {PARTNER}")
         await browser.close()
