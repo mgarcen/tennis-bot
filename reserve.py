@@ -171,47 +171,50 @@ async def main():
         print(f"5️⃣  Searching for {PARTNER} …")
         await screenshot(page, "06_reserva_cancha_page")
 
-        # Click Buscar first — this reveals the search input
-        buscar_btn = page.locator("button:has-text('Buscar'), input[value='Buscar']").first
-        await buscar_btn.wait_for(timeout=8000)
-        await buscar_btn.click()
-        print("   ✔ Clicked Buscar")
+        # Exact GeneXus button ID confirmed
+        await page.locator("#BTNBOTONBUSCAR").click()
+        print("   ✔ Clicked #BTNBOTONBUSCAR")
         await asyncio.sleep(2)
         await page.wait_for_load_state("networkidle")
         await screenshot(page, "07_after_buscar")
 
-        # Now type in search box
+        # Find and type into the search input
         search_box = None
         for sel in [
-            "input[maxlength='40']:not([disabled])",
-            "input[id*='NOMBRE' i]:not([disabled])",
-            "input[id*='JUGADOR' i]:not([disabled])",
             "input[id*='SOCIO' i]:not([disabled])",
+            "input[id*='NOMBRE' i]:not([disabled])",
+            "input[id*='BUSCA' i]:not([disabled])",
+            "input[maxlength='40']:not([disabled])",
             "input[type='text']:not([disabled])",
         ]:
             try:
                 loc = page.locator(sel).first
                 if await loc.is_visible(timeout=3000):
                     search_box = loc
-                    print(f"   ✔ Found search input: {sel}")
+                    sid = await loc.get_attribute('id')
+                    print(f"   ✔ Found search input id={sid}")
                     break
             except Exception:
                 continue
 
-        if search_box:
-            await search_box.click()
-            await search_box.type(PARTNER.split()[0], delay=80)
-            print(f"   ✔ Typed '{PARTNER.split()[0]}'")
-            await asyncio.sleep(0.5)
-            # Click Buscar again to trigger the search
-            await buscar_btn.click()
-            await asyncio.sleep(2)
-            await page.wait_for_load_state("networkidle")
-            await screenshot(page, "08_search_results")
+        if not search_box:
+            # Debug: print all inputs
+            inputs = await page.evaluate("""() =>
+                [...document.querySelectorAll('input')].map(i => i.id+'|'+i.type+'|'+i.value.substring(0,20))
+            """)
+            print("   All inputs:", inputs)
+            raise RuntimeError("❌ Search input not found after clicking Buscar")
 
-        # Select Kevin Monzon from results
+        await search_box.click()
+        await search_box.type(PARTNER.split()[0], delay=100)  # type "Kevin"
+        print(f"   ✔ Typed '{PARTNER.split()[0]}'")
+        await asyncio.sleep(2)  # wait for autocomplete dropdown
+        await screenshot(page, "08_autocomplete")
+
+        # Name stored as ALL CAPS in the system
+        partner_upper = PARTNER.upper()  # "KEVIN MONZON"
         partner_el = page.locator(
-            f"tr:has-text('{PARTNER}'), td:has-text('{PARTNER}')"
+            f"[id*='SOCIOFULLNOMBREAPELLIDO']:has-text('{partner_upper}') a"
         ).first
         await partner_el.wait_for(timeout=8000)
         await partner_el.click()
