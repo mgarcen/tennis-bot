@@ -178,37 +178,13 @@ async def main():
         await page.wait_for_load_state("networkidle")
         await screenshot(page, "07_after_buscar")
 
-        # Find and type into the search input
-        search_box = None
-        for sel in [
-            "input[id*='SOCIO' i]:not([disabled])",
-            "input[id*='NOMBRE' i]:not([disabled])",
-            "input[id*='BUSCA' i]:not([disabled])",
-            "input[maxlength='40']:not([disabled])",
-            "input[type='text']:not([disabled])",
-        ]:
-            try:
-                loc = page.locator(sel).first
-                if await loc.is_visible(timeout=3000):
-                    search_box = loc
-                    sid = await loc.get_attribute('id')
-                    print(f"   ✔ Found search input id={sid}")
-                    break
-            except Exception:
-                continue
-
-        if not search_box:
-            # Debug: print all inputs
-            inputs = await page.evaluate("""() =>
-                [...document.querySelectorAll('input')].map(i => i.id+'|'+i.type+'|'+i.value.substring(0,20))
-            """)
-            print("   All inputs:", inputs)
-            raise RuntimeError("❌ Search input not found after clicking Buscar")
-
+        # Exact input ID confirmed
+        search_box = page.locator("#vTEXTOBUSCAR")
+        await search_box.wait_for(timeout=8000)
         await search_box.click()
         await search_box.type(PARTNER.split()[0], delay=100)  # type "Kevin"
-        print(f"   ✔ Typed '{PARTNER.split()[0]}'")
-        await asyncio.sleep(2)  # wait for autocomplete dropdown
+        print(f"   ✔ Typed '{PARTNER.split()[0]}' into #vTEXTOBUSCAR")
+        await asyncio.sleep(2)  # wait for autocomplete
         await screenshot(page, "08_autocomplete")
 
         # Name stored as ALL CAPS in the system
