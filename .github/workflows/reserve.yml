@@ -2,37 +2,50 @@ name: Reserve Tennis Court
 
 on:
   schedule:
-    # 8:00 AM Uruguay time (UYT = UTC-3) = 11:00 AM UTC
-    - cron: "0 11 * * *"
-  workflow_dispatch:   # Allows manual trigger from GitHub UI (for testing)
+    - cron: "0 11 * * *"   # 8:00 AM Uruguay (UTC-3)
+  workflow_dispatch:
+    inputs:
+      court:
+        description: "Court number"
+        required: false
+        default: "5"
+      hour:
+        description: "Hour (24h format, e.g. 12:00)"
+        required: false
+        default: "12:00"
+      days_ahead:
+        description: "Days ahead to book"
+        required: false
+        default: "1"
+      partner:
+        description: "Partner name"
+        required: false
+        default: "Kevin Monzon"
 
 jobs:
   reserve:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
           playwright install chromium
           playwright install-deps chromium
-
       - name: Run reservation script
         env:
           TENNIS_USER: ${{ secrets.TENNIS_USER }}
           TENNIS_PASS: ${{ secrets.TENNIS_PASS }}
+          COURT: ${{ github.event.inputs.court || '5' }}
+          HOUR: ${{ github.event.inputs.hour || '12:00' }}
+          DAYS_AHEAD: ${{ github.event.inputs.days_ahead || '1' }}
+          PARTNER: ${{ github.event.inputs.partner || 'Kevin Monzon' }}
         run: python reserve.py
-
-      - name: Upload screenshots (always, for debugging)
+      - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
