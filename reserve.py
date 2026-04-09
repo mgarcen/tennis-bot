@@ -8,10 +8,10 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 BASE_URL   = "https://agenbot.net/deporyatenis"
 USERNAME   = os.environ["TENNIS_USER"]
 PASSWORD   = os.environ["TENNIS_PASS"]
-COURT      = "5"
-HOUR       = "12:00"
-DAYS_AHEAD = 1
-PARTNER    = "Kevin Monzon"
+COURT      = os.environ.get("COURT", "5")
+HOUR       = os.environ.get("HOUR", "12:00")
+DAYS_AHEAD = int(os.environ.get("DAYS_AHEAD", "1"))
+PARTNER    = os.environ.get("PARTNER", "Kevin Monzon"
 TZ         = ZoneInfo("America/Montevideo")
 
 def target_date():
