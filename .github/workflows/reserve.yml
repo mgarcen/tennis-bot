@@ -2,7 +2,7 @@ name: Reserve Tennis Court
 
 on:
   schedule:
-    - cron: "0 11 * * *"   # 8:00 AM Uruguay (UTC-3)
+    - cron: "2 11 * * *"   # 8:02 AM Uruguay (UTC-3)
   workflow_dispatch:
     inputs:
       court:
