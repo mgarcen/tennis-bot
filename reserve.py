@@ -9,7 +9,7 @@ BASE_URL   = "https://agenbot.net/deporyatenis"
 USERNAME   = os.environ["TENNIS_USER"]
 PASSWORD   = os.environ["TENNIS_PASS"]
 COURT      = os.environ.get("COURT", "5")
-HOUR       = os.environ.get("HOUR", "19:00")
+HOUR       = os.environ.get("HOUR", "9:00")
 DAYS_AHEAD = int(os.environ.get("DAYS_AHEAD", "1"))
 PARTNER    = os.environ.get("PARTNER", "Kevin Monzon")
 TZ         = ZoneInfo("America/Montevideo")
@@ -25,6 +25,18 @@ async def screenshot(page, name):
 async def main():
     date_str = target_date()
     print(f"🎾  Reserving Court {COURT} at {HOUR} on {date_str}")
+
+    # Wait until exactly 8:00 AM Uruguay time before starting
+    TARGET_HOUR   = 8
+    TARGET_MINUTE = 0
+    while True:
+        now = datetime.now(TZ)
+        if now.hour > TARGET_HOUR or (now.hour == TARGET_HOUR and now.minute >= TARGET_MINUTE):
+            print(f"   ✔ It's {now.strftime('%H:%M:%S')} — starting now")
+            break
+        wait_secs = (TARGET_HOUR * 60 + TARGET_MINUTE - now.hour * 60 - now.minute) * 60 - now.second
+        print(f"   ⏳ Waiting {wait_secs}s until 08:00 Uruguay time (now {now.strftime('%H:%M:%S')}) …")
+        await asyncio.sleep(min(wait_secs, 30))  # check every 30s max
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
