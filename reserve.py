@@ -190,20 +190,24 @@ async def main():
         print(f"5️⃣  Searching for {PARTNER} …")
         await screenshot(page, "06_reserva_cancha_page")
 
-        # Exact GeneXus button ID confirmed
-        await page.locator("#BTNBOTONBUSCAR").click()
+        # Wait for button to be ready, then click and wait for modal
+        buscar_loc = page.locator("#BTNBOTONBUSCAR")
+        await buscar_loc.wait_for(state="visible", timeout=10000)
+        await asyncio.sleep(1)
+        await buscar_loc.click()
         print("   ✔ Clicked #BTNBOTONBUSCAR")
-        await asyncio.sleep(2)
-        await page.wait_for_load_state("networkidle")
+        await asyncio.sleep(3)  # modal needs time to animate in
         await screenshot(page, "07_after_buscar")
 
-        # Exact input ID confirmed
+        # Exact input ID confirmed — inside the search modal
         search_box = page.locator("#vTEXTOBUSCAR")
-        await search_box.wait_for(timeout=8000)
+        await search_box.wait_for(state="visible", timeout=10000)
         await search_box.click()
         await search_box.type(PARTNER.split()[0], delay=100)  # type "Kevin"
         print(f"   ✔ Typed '{PARTNER.split()[0]}' into #vTEXTOBUSCAR")
         await asyncio.sleep(2)  # wait for autocomplete
+        await screenshot(page, "08_autocomplete")
+
         await screenshot(page, "08_autocomplete")
 
         # Name stored as ALL CAPS in the system
