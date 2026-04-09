@@ -234,7 +234,10 @@ async def main():
         await si_btn.click()
         print("   ✔ Clicked Sí (#DVELOP_CONFIRMPANEL_ENTERContainer_SaveButton)")
         await asyncio.sleep(2)
-        await page.wait_for_load_state("networkidle")
+        try:
+            await page.wait_for_load_state("networkidle", timeout=10000)
+        except PlaywrightTimeout:
+            pass  # Page may not reach networkidle after confirmation — that's fine
         await screenshot(confirm_page, "09_final")
 
         print(f"\n✅  Done! Court {COURT} on {date_str} at {HOUR} with {PARTNER}")
