@@ -227,6 +227,13 @@ async def main():
         await confirmar.click()
         print("   ✔ Clicked Confirmar")
         await asyncio.sleep(2)
+
+        # A "¿Confirma la reserva?" dialog appears — click Sí
+        si_btn = confirm_page.locator("#DVELOP_CONFIRMPANEL_ENTERContainer_SaveButton")
+        await si_btn.wait_for(timeout=8000)
+        await si_btn.click()
+        print("   ✔ Clicked Sí (#DVELOP_CONFIRMPANEL_ENTERContainer_SaveButton)")
+        await asyncio.sleep(2)
         await page.wait_for_load_state("networkidle")
         await screenshot(confirm_page, "09_final")
 
