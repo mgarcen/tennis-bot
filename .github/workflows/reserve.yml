@@ -2,7 +2,7 @@ name: Reserve Tennis Court
 
 on:
   schedule:
-    - cron: "2 11 * * *"   # 8:02 AM Uruguay (UTC-3)
+    - cron: "50 10 * * *"   # 7:50 AM Uruguay (UTC-3) — runs early to compensate for GitHub delays
   workflow_dispatch:
     inputs:
       court:
@@ -12,7 +12,7 @@ on:
       hour:
         description: "Hour (24h format, e.g. 12:00)"
         required: false
-        default: "19:00"
+        default: "12:00"
       days_ahead:
         description: "Days ahead to book"
         required: false
