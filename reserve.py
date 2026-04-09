@@ -113,11 +113,16 @@ async def main():
 
         await screenshot(page, "03b_ladrillo_set")
 
-        # Now navigate to tomorrow AFTER filter is set
-        await page.locator("#BTNBTNSIGUIENTE").click()
-        print("   ✔ Clicked #BTNBTNSIGUIENTE (next day)")
-        await asyncio.sleep(2)
-        await page.wait_for_load_state("networkidle")
+        # Navigate to target date — only click next if not already there
+        target_short = (datetime.now(TZ) + timedelta(days=DAYS_AHEAD)).strftime("%d/%m/%y")
+        page_text = await page.inner_text("body")
+        if target_short in page_text:
+            print(f"   ✔ Already on target date {target_short}, skipping next arrow")
+        else:
+            await page.locator("#BTNBTNSIGUIENTE").click()
+            print(f"   ✔ Clicked next arrow → {target_short}")
+            await asyncio.sleep(2)
+            await page.wait_for_load_state("networkidle")
         await screenshot(page, "03_tomorrow")
 
         # ── 4. FIND CANCHA 5 AT 19:00 AND CLICK RESERVAR ─────────────────────
@@ -127,7 +132,21 @@ async def main():
 
         # Dynamically find the row containing HOUR and COURT, then click its Reservar button
         row_selector = "[id*='Gridsdthorasdeldia_horassContainerRow']"
-        await page.locator(row_selector).first.wait_for(timeout=10000)
+
+        # Wait longer and debug if not found
+        try:
+            await page.locator(row_selector).first.wait_for(timeout=10000)
+        except PlaywrightTimeout:
+            # Print actual grid-related IDs on the page to find the correct prefix
+            grid_ids = await page.evaluate("""() =>
+                [...document.querySelectorAll('[id]')]
+                    .map(el => el.id)
+                    .filter(id => id.toLowerCase().includes('grid') || id.toLowerCase().includes('row') || id.toLowerCase().includes('hora'))
+                    .slice(0, 30)
+            """)
+            print("   Grid-related IDs found:", grid_ids)
+            await screenshot(page, "04_FAIL_no_grid")
+            raise RuntimeError("❌ Grid rows not found — check 04_FAIL_no_grid.png and logs above")
 
         rows = page.locator(row_selector)
         row_count = await rows.count()
