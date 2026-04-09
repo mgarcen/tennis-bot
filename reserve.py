@@ -190,23 +190,31 @@ async def main():
         print(f"5️⃣  Searching for {PARTNER} …")
         await screenshot(page, "06_reserva_cancha_page")
 
-        # Wait for button to be ready, then click and wait for modal
+        # Wait for Buscar button and click it
         buscar_loc = page.locator("#BTNBOTONBUSCAR")
         await buscar_loc.wait_for(state="visible", timeout=10000)
         await asyncio.sleep(1)
         await buscar_loc.click()
         print("   ✔ Clicked #BTNBOTONBUSCAR")
-        await asyncio.sleep(3)  # modal needs time to animate in
+        await asyncio.sleep(3)
         await screenshot(page, "07_after_buscar")
 
-        # Exact input ID confirmed — inside the search modal
-        search_box = page.locator("#vTEXTOBUSCAR")
-        await search_box.wait_for(state="visible", timeout=10000)
-        await search_box.click()
-        await search_box.type(PARTNER.split()[0], delay=100)  # type "Kevin"
-        print(f"   ✔ Typed '{PARTNER.split()[0]}' into #vTEXTOBUSCAR")
-        await asyncio.sleep(2)  # wait for autocomplete
+        # Modal is open but Playwright visibility check fails due to CSS overlay
+        # Use JS to focus the input, then type with keyboard
+        focused = await page.evaluate("""() => {
+            const input = document.getElementById('vTEXTOBUSCAR');
+            if (input) { input.focus(); return true; }
+            return false;
+        }""")
+        if not focused:
+            raise RuntimeError("❌ #vTEXTOBUSCAR not found in DOM")
+        print("   ✔ Focused #vTEXTOBUSCAR via JS")
+
+        await page.keyboard.type(PARTNER.split()[0], delay=100)  # type "Kevin"
+        print(f"   ✔ Typed '{PARTNER.split()[0]}'")
+        await asyncio.sleep(2)
         await screenshot(page, "08_autocomplete")
+
 
         await screenshot(page, "08_autocomplete")
 
