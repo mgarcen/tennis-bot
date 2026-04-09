@@ -11,7 +11,7 @@ PASSWORD   = os.environ["TENNIS_PASS"]
 COURT      = os.environ.get("COURT", "5")
 HOUR       = os.environ.get("HOUR", "12:00")
 DAYS_AHEAD = int(os.environ.get("DAYS_AHEAD", "1"))
-PARTNER    = os.environ.get("PARTNER", "Kevin Monzon"
+PARTNER    = os.environ.get("PARTNER", "Kevin Monzon")
 TZ         = ZoneInfo("America/Montevideo")
 
 def target_date():
