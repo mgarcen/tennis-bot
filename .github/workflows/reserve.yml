@@ -12,7 +12,7 @@ on:
       hour:
         description: "Hour (24h format, e.g. 12:00)"
         required: false
-        default: "12:00"
+        default: "10:00"
       days_ahead:
         description: "Days ahead to book"
         required: false
