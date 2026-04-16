@@ -41,7 +41,7 @@ jobs:
           TENNIS_USER: ${{ secrets.TENNIS_USER }}
           TENNIS_PASS: ${{ secrets.TENNIS_PASS }}
           COURT: ${{ github.event.inputs.court || '5' }}
-          HOUR: ${{ github.event.inputs.hour || '12:00' }}
+          HOUR: ${{ github.event.inputs.hour || '10:00' }}
           DAYS_AHEAD: ${{ github.event.inputs.days_ahead || '1' }}
           PARTNER: ${{ github.event.inputs.partner || 'Kevin Monzon' }}
         run: python reserve.py
