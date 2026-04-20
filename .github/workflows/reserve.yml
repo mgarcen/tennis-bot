@@ -22,6 +22,12 @@ on:
         required: false
         default: "Kevin Monzon"
 
+env:
+  COURT: ${{ github.event.inputs.court || vars.DEFAULT_COURT || '5' }}
+  HOUR: ${{ github.event.inputs.hour || vars.DEFAULT_HOUR || '10:00' }}
+  DAYS_AHEAD: ${{ github.event.inputs.days_ahead || vars.DEFAULT_DAYS_AHEAD || '1' }}
+  PARTNER: ${{ github.event.inputs.partner || vars.DEFAULT_PARTNER || 'Kevin Monzon' }}
+
 jobs:
   reserve:
     runs-on: ubuntu-22.04
@@ -40,10 +46,10 @@ jobs:
         env:
           TENNIS_USER: ${{ secrets.TENNIS_USER }}
           TENNIS_PASS: ${{ secrets.TENNIS_PASS }}
-          COURT: ${{ github.event.inputs.court || '5' }}
-          HOUR: ${{ github.event.inputs.hour || '10:00' }}
-          DAYS_AHEAD: ${{ github.event.inputs.days_ahead || '1' }}
-          PARTNER: ${{ github.event.inputs.partner || 'Kevin Monzon' }}
+          COURT: ${{ env.COURT }}
+          HOUR: ${{ env.HOUR }}
+          DAYS_AHEAD: ${{ env.DAYS_AHEAD }}
+          PARTNER: ${{ env.PARTNER }}
         run: python reserve.py
       - name: Upload screenshots
         if: always()
