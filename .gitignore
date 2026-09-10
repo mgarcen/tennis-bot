@@ -3,3 +3,4 @@ __pycache__/
 .env
 screenshots/
 schedule.json
+users.json
