@@ -126,7 +126,10 @@ async def post_init(app: Application):
     scheduler.start()
     app.bot_data["scheduler"] = scheduler
     log.info("Scheduler started — daily run at 08:00 America/Montevideo")
-    await app.bot.send_message(chat_id=CHAT_ID, text="🎾 Tennis bot online.")
+    try:
+        await app.bot.send_message(chat_id=CHAT_ID, text="🎾 Tennis bot online.")
+    except Exception:
+        log.exception("Could not send startup message (has the chat started a conversation with the bot?)")
 
 
 def main():
