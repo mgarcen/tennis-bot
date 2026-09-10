@@ -1,9 +1,8 @@
 name: Reserve Tennis Court
 
 on:
-  schedule:
-    - cron: "20 10 * * *"   # 7:20 AM Uruguay (UTC-3) — runs early to compensate for GitHub delays
-    - cron: "50 10 * * *"   # 7:50 AM Uruguay (UTC-3) — runs early to compensate for GitHub delays (second attempt)
+  # Daily scheduling now runs on Railway via bot.py + APScheduler (see README).
+  # This workflow is kept for manual test runs of reserve.py only.
   workflow_dispatch:
     inputs:
       court:
