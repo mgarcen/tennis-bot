@@ -68,16 +68,20 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
             await page.wait_for_load_state("networkidle")
             print("   ✔ LADRILLO selected")
 
-            # Navigate to target date only if not already there
+            # Navigate to target date, clicking "Siguiente" forward as many times as needed
             target_short = (datetime.now(TZ) + timedelta(days=days_ahead)).strftime("%d/%m/%y")
-            page_text = await page.inner_text("body")
-            if target_short in page_text:
-                print(f"   ✔ Already on {target_short}")
-            else:
+            max_clicks = max(days_ahead + 2, 5)
+            for click_num in range(max_clicks):
+                page_text = await page.inner_text("body")
+                if target_short in page_text:
+                    print(f"   ✔ On {target_short}" + (f" (after {click_num} clicks)" if click_num else " (already there)"))
+                    break
                 await page.locator("#BTNBTNSIGUIENTE").click()
                 await asyncio.sleep(2)
                 await page.wait_for_load_state("networkidle")
-                print(f"   ✔ Navigated to {target_short}")
+            else:
+                await screenshot(page, "03_FAIL_date_not_found", screenshot_dir)
+                raise RuntimeError(f"❌ No pude navegar hasta la fecha {target_short}")
             await screenshot(page, "03_schedule", screenshot_dir)
 
             # ── 4. FIND & CLICK RESERVAR FOR TARGET COURT + HOUR ──────────────

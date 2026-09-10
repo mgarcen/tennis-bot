@@ -1,11 +1,13 @@
 import json
 import logging
 import os
+from datetime import date as date_cls, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -32,7 +34,33 @@ DEFAULT_USER = {
     "partner": "Kevin Monzon",
     "partners": [],
     "days_ahead": 1,
+    "pending": [],
 }
+
+
+def parse_date_arg(text: str) -> date_cls:
+    """Parse 'DD/MM' (nearest future occurrence) or 'DD/MM/AAAA'."""
+    parts = text.split("/")
+    if len(parts) not in (2, 3):
+        raise ValueError("Formato de fecha inválido, usá DD/MM (ej: 15/09)")
+    try:
+        day, month = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise ValueError("Formato de fecha inválido, usá DD/MM (ej: 15/09)")
+    today = datetime.now(TZ).date()
+    if len(parts) == 3:
+        year = int(parts[2])
+        if year < 100:
+            year += 2000
+    else:
+        year = today.year
+    try:
+        result = date_cls(year, month, day)
+    except ValueError:
+        raise ValueError("Esa fecha no existe")
+    if len(parts) == 2 and result <= today:
+        result = date_cls(year + 1, month, day)
+    return result
 
 
 def load_users():
@@ -58,6 +86,8 @@ def get_user(chat_id: int) -> dict:
     if key not in users:
         users[key] = dict(DEFAULT_USER)
         users[key]["partners"] = []
+        users[key]["pending"] = []
+    users[key].setdefault("pending", [])
     return users[key]
 
 
@@ -108,6 +138,63 @@ async def reservar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def reservarfecha_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _authorized(update):
+        return
+    chat_id = update.effective_chat.id
+    u = get_user(chat_id)
+    if not u.get("tennis_user"):
+        await update.message.reply_text("Primero iniciá sesión: /login usuarioDeporYA contraseña")
+        return
+    args = context.args
+    if len(args) < 4:
+        await update.message.reply_text(
+            "Uso: /reservarfecha DD/MM HH:MM cancha nombreDelPartner\n"
+            "Ej: /reservarfecha 15/09 19:00 5 Kevin Monzon"
+        )
+        return
+    date_str, hour, court, *partner_parts = args
+    partner = " ".join(partner_parts)
+
+    try:
+        target_date = parse_date_arg(date_str)
+    except ValueError as e:
+        await update.message.reply_text(f"❌ {e}")
+        return
+
+    today = datetime.now(TZ).date()
+    if target_date <= today:
+        await update.message.reply_text("❌ La fecha tiene que ser a partir de mañana.")
+        return
+
+    run_at = datetime.combine(target_date - timedelta(days=1), time(8, 0, 0), tzinfo=TZ)
+    entry = {
+        "date": target_date.strftime("%d/%m/%Y"),
+        "hour": hour,
+        "court": court,
+        "partner": partner,
+        "run_at": run_at.isoformat(),
+    }
+    u["pending"] = [p for p in u["pending"] if p["date"] != entry["date"]]
+    u["pending"].append(entry)
+    if partner not in u["partners"]:
+        u["partners"].append(partner)
+    save_users(users)
+
+    schedule_pending_job(context.application, chat_id, entry)
+
+    if run_at <= datetime.now(TZ):
+        await update.message.reply_text(
+            f"✅ Ya está abierto — reservando ahora:\n"
+            f"🏟️ Cancha {court} · 🕗 {hour} · 📅 {entry['date']} · 🤝 {partner}"
+        )
+    else:
+        await update.message.reply_text(
+            f"✅ Programado — el {run_at.strftime('%d/%m')} a las 08:00 reservo automáticamente:\n"
+            f"🏟️ Cancha {court} · 🕗 {hour} · 📅 {entry['date']} · 🤝 {partner}"
+        )
+
+
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update):
         return
@@ -116,22 +203,52 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No iniciaste sesión todavía: /login usuarioDeporYA contraseña")
         return
     status = "✅ activo" if u["enabled"] else "🚫 cancelado"
+    pending_txt = ""
+    if u["pending"]:
+        lines = [f"  • {p['date']} — Cancha {p['court']} {p['hour']} con {p['partner']}" for p in u["pending"]]
+        pending_txt = "\n\n📆 Reservas programadas para fechas puntuales:\n" + "\n".join(lines)
     await update.message.reply_text(
         f"📋 Estado: {status}\n"
         f"🏟️ Cancha: {u['court']}\n"
         f"🕗 Hora: {u['hour']}\n"
         f"🤝 Partner: {u['partner']}\n"
         f"📅 Reserva automática todos los días a las 08:00 (Uruguay)"
+        f"{pending_txt}"
     )
 
 
 async def cancelar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update):
         return
-    u = get_user(update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    u = get_user(chat_id)
+    args = context.args
+
+    if args:
+        try:
+            target_date = parse_date_arg(args[0])
+        except ValueError as e:
+            await update.message.reply_text(f"❌ {e}")
+            return
+        date_key = target_date.strftime("%d/%m/%Y")
+        before = len(u["pending"])
+        u["pending"] = [p for p in u["pending"] if p["date"] != date_key]
+        save_users(users)
+        scheduler = context.application.bot_data.get("scheduler")
+        if scheduler:
+            try:
+                scheduler.remove_job(pending_job_id(chat_id, date_key))
+            except Exception:
+                pass
+        if len(u["pending"]) < before:
+            await update.message.reply_text(f"🚫 Cancelada la reserva programada para el {date_key}.")
+        else:
+            await update.message.reply_text(f"No tenía ninguna reserva programada para el {date_key}.")
+        return
+
     u["enabled"] = False
     save_users(users)
-    await update.message.reply_text("🚫 Reserva automática cancelada. Usá /reservar para reactivarla.")
+    await update.message.reply_text("🚫 Reserva automática diaria cancelada. Usá /reservar para reactivarla.")
 
 
 async def socios_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -188,11 +305,98 @@ async def ayuda_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*/socios* — ver tus partners guardados\n"
         "*/socios agregar Nombre Apellido* — guardar un partner\n"
         "*/socios borrar Nombre* — borrar un partner\n\n"
+        "3️⃣ ¿Querés reservar una fecha puntual más adelante (no todos los días)?\n"
+        "`/reservarfecha DD/MM HH:MM cancha partner`\n"
+        "Ej: `/reservarfecha 15/09 19:00 5 Kevin Monzon`\n"
+        "Esto no reserva ahora: espera y reserva automáticamente a las 08:00 del día "
+        "anterior (cuando la cancha abre esa fecha), aunque el bot se haya reiniciado "
+        "en el medio.\n"
+        "*/cancelar DD/MM* — cancela una reserva de fecha puntual específica.\n\n"
         "Te aviso por acá después de cada intento, con una captura de pantalla.\n\n"
         "Cada persona tiene su propia cuenta de DeporYA y su propia programación — "
         "lo que vos configures no afecta a nadie más.",
         parse_mode="Markdown",
     )
+
+
+def pending_job_id(chat_id: int, date_key: str) -> str:
+    return f"oneoff_{chat_id}_{date_key.replace('/', '-')}"
+
+
+def schedule_pending_job(app: Application, chat_id: int, entry: dict):
+    scheduler = app.bot_data.get("scheduler")
+    if scheduler is None:
+        return
+    run_at = datetime.fromisoformat(entry["run_at"])
+    now = datetime.now(TZ)
+    if run_at < now:
+        run_at = now + timedelta(seconds=5)
+    scheduler.add_job(
+        run_pending_reservation,
+        DateTrigger(run_date=run_at, timezone=TZ),
+        args=[app, chat_id, entry],
+        id=pending_job_id(chat_id, entry["date"]),
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+
+async def run_pending_reservation(app: Application, chat_id: int, entry: dict):
+    u = get_user(chat_id)
+    # One-shot: drop it from pending regardless of outcome.
+    u["pending"] = [p for p in u["pending"] if p["date"] != entry["date"]]
+    save_users(users)
+
+    if not u.get("tennis_user"):
+        try:
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ No pude reservar el {entry['date']}: no hay credenciales guardadas (/login).",
+            )
+        except Exception:
+            log.exception("Could not notify chat %s", chat_id)
+        return
+
+    target_date = datetime.strptime(entry["date"], "%d/%m/%Y").date()
+    days_ahead = (target_date - datetime.now(TZ).date()).days
+    if days_ahead < 1:
+        try:
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ No pude reservar el {entry['date']}: la fecha ya pasó (¿el bot estuvo caído?).",
+            )
+        except Exception:
+            log.exception("Could not notify chat %s", chat_id)
+        return
+
+    log.info("Running one-off reservation for chat %s: %s", chat_id, entry["date"])
+    try:
+        result = await run_reservation(
+            username=u["tennis_user"],
+            password=u["tennis_pass"],
+            court=entry["court"],
+            hour=entry["hour"],
+            days_ahead=days_ahead,
+            partner=entry["partner"],
+            screenshot_dir=f"screenshots/{chat_id}",
+        )
+    except Exception as e:
+        log.exception("One-off reservation crashed for chat %s", chat_id)
+        result = {"success": False, "message": str(e), "screenshot": None}
+
+    text = (
+        f"✅ Reserva confirmada para el {entry['date']}: {result['message']}"
+        if result["success"]
+        else f"❌ Falló la reserva del {entry['date']}: {result['message']}"
+    )
+    try:
+        await app.bot.send_message(chat_id=chat_id, text=text)
+        shot = result.get("screenshot")
+        if shot and os.path.exists(shot):
+            with open(shot, "rb") as f:
+                await app.bot.send_photo(chat_id=chat_id, photo=f)
+    except Exception:
+        log.exception("Could not notify chat %s", chat_id)
 
 
 async def run_scheduled_reservations(app: Application):
@@ -243,9 +447,18 @@ async def post_init(app: Application):
     )
     scheduler.start()
     app.bot_data["scheduler"] = scheduler
+
+    rearmed = 0
+    for chat_id_str, u in users.items():
+        for entry in u.get("pending", []):
+            schedule_pending_job(app, int(chat_id_str), entry)
+            rearmed += 1
+
     log.info(
-        "Scheduler started — daily run at 08:00 America/Montevideo for %d allowed chat(s)",
+        "Scheduler started — daily run at 08:00 America/Montevideo for %d allowed chat(s), "
+        "%d pending one-off booking(s) re-armed",
         len(ALLOWED_CHAT_IDS),
+        rearmed,
     )
 
 
@@ -255,6 +468,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("login", login_cmd))
     app.add_handler(CommandHandler("reservar", reservar_cmd))
+    app.add_handler(CommandHandler("reservarfecha", reservarfecha_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("cancelar", cancelar_cmd))
     app.add_handler(CommandHandler("socios", socios_cmd))

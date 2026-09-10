@@ -19,11 +19,20 @@ That config is a standing daily setting, not a one-time booking: once set with
 `/reservar`, the same hour/court/partner get booked again automatically every following
 day until changed or paused with `/cancelar`.
 
+For a specific future date instead of the daily rolling booking, `/reservarfecha`
+schedules a one-time reservation: it does nothing until 08:00 on the morning that date
+opens (the day before it, since DeporYA opens one day ahead at a time), then books it
+once and stops. That wake-up time is persisted in `users.json` and re-armed on every
+bot restart, so it survives a Railway redeploy in between — if the open time already
+passed while the bot was down, it fires almost immediately on the next startup instead
+of silently missing it.
+
 Under the hood, each run: logs into `agenbot.net/deporyatenis` with headless Chromium
-using that person's own credentials, selects the LADRILLO surface, opens tomorrow's
-schedule grid, clicks the row matching the configured hour + court, searches for the
-partner by name, and confirms the reservation. Whether it succeeds or fails, that
-person gets a Telegram message with the result and a screenshot.
+using that person's own credentials, selects the LADRILLO surface, opens the target
+day's schedule grid (clicking "Siguiente" forward as many times as needed), clicks the
+row matching the configured hour + court, searches for the partner by name, and
+confirms the reservation. Whether it succeeds or fails, that person gets a Telegram
+message with the result and a screenshot.
 
 ## Multi-user access
 
@@ -47,8 +56,10 @@ DeporYA login.
 ## Telegram commands
 - `/login usuario contraseña` — save your own DeporYA credentials (required once, before `/reservar`).
 - `/reservar HH:MM cancha partner` — e.g. `/reservar 19:00 5 Kevin Monzon`. Sets your daily booking and arms it.
-- `/status` — shows your current config and whether it's armed.
+- `/reservarfecha DD/MM HH:MM cancha partner` — e.g. `/reservarfecha 15/09 19:00 5 Kevin Monzon`. One-time booking for a specific future date; fires automatically at 08:00 the morning it opens.
+- `/status` — shows your current config, whether it's armed, and any pending one-off bookings.
 - `/cancelar` — pauses your daily booking.
+- `/cancelar DD/MM` — cancels one pending one-off booking for that date.
 - `/socios` — list your saved partners.
 - `/socios agregar Nombre Apellido` — save a partner for quick reuse.
 - `/socios borrar Nombre` — remove a saved partner.
