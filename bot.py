@@ -89,6 +89,25 @@ async def cancelar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🚫 Reserva automática cancelada. Usá /reservar para reactivarla.")
 
 
+async def ayuda_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _authorized(update):
+        return
+    await update.message.reply_text(
+        "🎾 *Cómo funciona*\n\n"
+        "Todos los días a las 08:00 (hora Uruguay) el bot intenta reservar "
+        "automáticamente la cancha de *mañana*, usando la última configuración "
+        "guardada (hora, cancha y partner).\n\n"
+        "*/reservar HH:MM cancha partner* — cambia y activa la reserva diaria.\n"
+        "Ej: `/reservar 19:00 5 Kevin Monzon`\n\n"
+        "*/status* — muestra la configuración actual y si está activa.\n\n"
+        "*/cancelar* — desactiva la próxima reserva automática (queda pausada "
+        "hasta que uses /reservar de nuevo).\n\n"
+        "Después de cada intento (haya salido bien o mal) te aviso por acá, "
+        "con una captura de pantalla del resultado.",
+        parse_mode="Markdown",
+    )
+
+
 async def run_scheduled_reservation(app: Application):
     if not state.get("enabled"):
         log.info("Skipping scheduled run — currently disabled")
@@ -137,6 +156,7 @@ def main():
     app.add_handler(CommandHandler("reservar", reservar_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("cancelar", cancelar_cmd))
+    app.add_handler(CommandHandler(["ayuda", "help", "start"], ayuda_cmd))
     app.run_polling()
 
 
