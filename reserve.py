@@ -250,7 +250,10 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
                 error_shot = await screenshot(page, "ERROR", screenshot_dir)
             except Exception:
                 pass
-            return {"success": False, "message": str(e), "screenshot": error_shot}
+            # Playwright timeout errors include a long multi-line call log —
+            # keep just the first line so it fits in a Telegram message.
+            short_message = str(e).strip().split("\n")[0][:300]
+            return {"success": False, "message": short_message, "screenshot": error_shot}
 
         finally:
             await browser.close()

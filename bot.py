@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from datetime import date as date_cls, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -36,6 +37,18 @@ DEFAULT_USER = {
     "days_ahead": 1,
     "pending": [],
 }
+
+
+HOUR_RE = re.compile(r"^\d{1,2}:\d{2}$")
+
+
+def validate_hour_court(hour: str, court: str) -> str | None:
+    """Returns an error message if hour/court look swapped or malformed, else None."""
+    if not HOUR_RE.match(hour):
+        return f"❌ '{hour}' no parece una hora válida (formato HH:MM, ej: 19:00). ¿Escribiste los argumentos en el orden correcto?"
+    if not court.isdigit():
+        return f"❌ '{court}' no parece un número de cancha válido. ¿Escribiste los argumentos en el orden correcto?"
+    return None
 
 
 def parse_date_arg(text: str) -> date_cls:
@@ -128,6 +141,10 @@ async def reservar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     hour, court, *partner_parts = args
     partner = " ".join(partner_parts)
+    err = validate_hour_court(hour, court)
+    if err:
+        await update.message.reply_text(err)
+        return
     u.update({"enabled": True, "hour": hour, "court": court, "partner": partner})
     if partner not in u["partners"]:
         u["partners"].append(partner)
@@ -155,6 +172,10 @@ async def reservarfecha_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     date_str, hour, court, *partner_parts = args
     partner = " ".join(partner_parts)
+    err = validate_hour_court(hour, court)
+    if err:
+        await update.message.reply_text(err)
+        return
 
     try:
         target_date = parse_date_arg(date_str)
