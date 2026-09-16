@@ -105,12 +105,17 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
             print(f"   Found {row_count} rows")
 
             clicked = False
+            unavailable = False
             for i in range(row_count):
                 row = rows.nth(i)
                 text = await row.inner_text()
                 if hour in text and court in text:
                     btn = row.locator("input[type=button], button, a").first
-                    await btn.click()
+                    if not await btn.is_visible():
+                        print(f"   • Row {i} matched {hour} + Cancha {court} but its Reserva link is hidden (already booked?)")
+                        unavailable = True
+                        continue
+                    await btn.click(timeout=5000)
                     print(f"   ✔ Clicked row {i} → matched {hour} + Cancha {court}")
                     clicked = True
                     break
@@ -120,12 +125,18 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
                     text = await row.inner_text()
                     if hour in text:
                         btn = row.locator("input[type=button], button, a").first
-                        await btn.click()
+                        if not await btn.is_visible():
+                            print(f"   • Row {i} matched {hour} but its Reserva link is hidden (already booked?)")
+                            unavailable = True
+                            continue
+                        await btn.click(timeout=5000)
                         print(f"   ✔ Clicked row {i} → matched {hour} only")
                         clicked = True
                         break
             if not clicked:
                 await screenshot(page, "04_FAIL_no_row", screenshot_dir)
+                if unavailable:
+                    raise RuntimeError(f"❌ Cancha {court} a las {hour} ya no está disponible (reservada por otra persona)")
                 raise RuntimeError(f"❌ No row found for {hour} Cancha {court}")
 
             await asyncio.sleep(2)
