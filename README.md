@@ -5,6 +5,7 @@ people, each with their own DeporYA login.
 
 ## Files
 - `reserve.py` — Playwright flow that logs in and books a court (`run_reservation(...)`).
+- `test_matching.py` — tests for the grid-row court/hour matching in `reserve.py`.
 - `bot.py` — multi-user Telegram bot (`/login`, `/reservarfecha`, `/status`, `/cancelar`, `/socios`) + APScheduler.
 - `users.json` — per-chat account data (DeporYA credentials, saved partners, pending bookings). Git-ignored; written by the bot at `STATE_DIR/users.json`.
 
@@ -23,11 +24,28 @@ was down, it fires almost immediately on the next startup instead of silently mi
 it.
 
 Under the hood, each run: logs into `agenbot.net/deporyatenis` with headless Chromium
-using that person's own credentials, selects the LADRILLO surface, opens the target
-day's schedule grid (clicking "Siguiente" forward as many times as needed), clicks the
-row matching the configured hour + court, searches for the partner by name, and
-confirms the reservation. Whether it succeeds or fails, that person gets a Telegram
-message with the result and a screenshot.
+using that person's own credentials, opens the target day's schedule grid (clicking
+"Siguiente" forward as many times as needed), clicks the row matching the requested
+hour + court, searches for the partner by name, and confirms the reservation. Whether
+it succeeds or fails, that person gets a Telegram message with the result and a
+screenshot.
+
+## Courts and surfaces
+
+The club has two surfaces (ladrillo and cemento) and court numbers are unique across
+both, so you book by number alone — `cancha 5` means court 5 wherever it happens to be.
+The bot reads the surface dropdown (`#vTIPOCANCHAID`) at run time and searches each
+surface in turn until it finds that court at that hour, then reports back which surface
+it booked. Nothing is hardcoded to one surface; passing `surface=` to
+`run_reservation()` (or `SURFACE=` when running `reserve.py` directly) narrows the
+search to a single one, which is only useful for testing.
+
+Row matching is exact on both number and time: `row_courts()` strips times out of the
+row text before reading court numbers, so a request for court 5 is never satisfied by
+the `5` in `15:00` or by `Cancha 15`, and a request for an hour has to match a real time
+token in the row. `test_matching.py` covers those cases — run `python3 test_matching.py`
+after touching that logic. If a court genuinely isn't free, the run fails and says so
+rather than booking a different court.
 
 ## Multi-user access
 
@@ -49,7 +67,7 @@ DeporYA login.
 
 ## Telegram commands
 - `/login usuario contraseña` — save your own DeporYA credentials (required once, before `/reservarfecha`).
-- `/reservarfecha DD/MM HH:MM cancha partner` — e.g. `/reservarfecha 15/09 19:00 5 Kevin Monzon`. One-time booking for a specific future date; fires automatically at 08:00 the morning it opens.
+- `/reservarfecha DD/MM HH:MM cancha partner` — e.g. `/reservarfecha 15/09 19:00 5 Kevin Monzon`. One-time booking for a specific future date; fires automatically at 08:00 the morning it opens. `cancha` is just the court number, ladrillo or cemento.
 - `/status` — lists your pending scheduled bookings.
 - `/cancelar DD/MM` — cancels the pending booking for that date.
 - `/socios` — list your saved partners.

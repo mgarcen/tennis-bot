@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
@@ -7,6 +8,39 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 # ── Config ────────────────────────────────────────────────────────────────────
 BASE_URL = "https://agenbot.net/deporyatenis"
 TZ = ZoneInfo("America/Montevideo")
+
+ROW_SELECTOR = "[id*='Gridsdthorasdeldia_horassContainerRow']"
+TIME_RE = re.compile(r"\b(\d{1,2}):(\d{2})\b")
+COURT_LABEL_RE = re.compile(r"cancha\s*n?[°º]?\s*0*(\d{1,2})", re.IGNORECASE)
+
+
+def parse_hour(text):
+    """'9:00' or '09:00' → (9, 0). None if it isn't a time."""
+    m = TIME_RE.fullmatch(str(text).strip())
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def fmt_hour(hour_tuple):
+    return f"{hour_tuple[0]:02d}:{hour_tuple[1]:02d}"
+
+
+def row_hours(text):
+    """Every time mentioned in a row, as (h, m) — so '9:00' matches '09:00'."""
+    return [(int(h), int(m)) for h, m in TIME_RE.findall(text)]
+
+
+def row_courts(text):
+    """Court numbers mentioned in a row.
+
+    Times are stripped first, so Cancha 5 is never matched by a 15:00 slot. When the
+    row labels its court ('Cancha 5') only labelled numbers count; otherwise we fall
+    back to any standalone number in the row.
+    """
+    without_times = TIME_RE.sub(" ", text)
+    labelled = COURT_LABEL_RE.findall(without_times)
+    if labelled:
+        return [int(n) for n in labelled]
+    return [int(n) for n in re.findall(r"\b0*(\d{1,2})\b", without_times)]
 
 
 async def screenshot(page, name, screenshot_dir):
@@ -17,14 +51,121 @@ async def screenshot(page, name, screenshot_dir):
     return path
 
 
+async def surface_options(page):
+    """[(value, label)] of the surface dropdown, in the order the page lists them."""
+    return await page.evaluate("""() =>
+        [...document.querySelectorAll('#vTIPOCANCHAID option')]
+            .map(o => [o.value, (o.textContent || '').trim()])
+            .filter(([value, label]) => value && label)
+    """)
+
+
+async def select_surface(page, value):
+    await page.locator("#vTIPOCANCHAID").select_option(value=value)
+    await asyncio.sleep(3)
+    await page.wait_for_load_state("networkidle")
+
+
+async def goto_target_date(page, target_short, days_ahead):
+    """Click 'Siguiente' until the target day's grid is showing.
+
+    Returns the number of clicks it took, or None if the date never appeared.
+    """
+    for click_num in range(max(days_ahead + 2, 5)):
+        if target_short in await page.inner_text("body"):
+            return click_num
+        await page.locator("#BTNBTNSIGUIENTE").click()
+        await asyncio.sleep(2)
+        await page.wait_for_load_state("networkidle")
+    return None
+
+
+async def find_court_row(page, hour_tuple, court_num):
+    """Find the grid row for this exact court + hour on the surface now showing.
+
+    Returns (row, state): state is "free" (bookable, row returned), "taken" (the row
+    exists but its Reserva link is hidden, so someone else has it) or "missing" (this
+    surface has no such court/hour).
+    """
+    try:
+        await page.locator(ROW_SELECTOR).first.wait_for(timeout=10000)
+    except PlaywrightTimeout:
+        # No grid at all — dump candidate ids so a markup change is diagnosable.
+        grid_ids = await page.evaluate("""() =>
+            [...document.querySelectorAll('[id]')]
+                .map(el => el.id)
+                .filter(id => id.toLowerCase().includes('grid') || id.toLowerCase().includes('row'))
+                .slice(0, 20)
+        """)
+        print("      no grid rows; candidate ids:", grid_ids)
+        return None, "no-grid"
+
+    rows = page.locator(ROW_SELECTOR)
+    row_count = await rows.count()
+    print(f"      {row_count} rows")
+
+    state = "missing"
+    for i in range(row_count):
+        row = rows.nth(i)
+        text = await row.inner_text()
+        if hour_tuple not in row_hours(text) or court_num not in row_courts(text):
+            continue
+        btn = row.locator("input[type=button], button, a").first
+        if not await btn.is_visible():
+            print(f"      • row {i} is Cancha {court_num} at {fmt_hour(hour_tuple)}, Reserva link hidden (already booked)")
+            state = "taken"
+            continue
+        print(f"      ✔ row {i} → Cancha {court_num} at {fmt_hour(hour_tuple)}")
+        return row, "free"
+    return None, state
+
+
+async def find_court_across_surfaces(page, hour_tuple, court_num, options,
+                                     target_short, days_ahead):
+    """Search each surface in turn for this court + hour.
+
+    Returns (row, label, states): `row` is the bookable row and `label` the surface it
+    was found on, or (None, None, states) if no surface had it free. `states` holds one
+    outcome per surface tried, so the caller can tell "someone booked it" apart from
+    "that court doesn't exist here" and from the site having changed.
+    """
+    states = []
+    for value, label in options:
+        print(f"   → {label} …")
+        await select_surface(page, value)
+        if await goto_target_date(page, target_short, days_ahead) is None:
+            print(f"      • could not reach {target_short} on {label}")
+            states.append("no-date")
+            continue
+        row, state = await find_court_row(page, hour_tuple, court_num)
+        states.append(state)
+        if state == "free":
+            return row, label, states
+    return None, None, states
+
+
 async def run_reservation(username, password, court="5", hour="10:00", days_ahead=1,
-                           partner="Kevin Monzon", screenshot_dir="screenshots"):
+                           partner="Kevin Monzon", screenshot_dir="screenshots",
+                           surface=None):
     """Run the full DeporYA reservation flow.
+
+    Court numbers are unique across the club, so `court` alone identifies a court and
+    the surface it sits on is discovered by searching each one. Pass `surface` (a
+    dropdown label) to skip that search and look only there.
 
     Returns {"success": bool, "message": str, "screenshot": str | None}.
     """
-    date_str = (datetime.now(TZ) + timedelta(days=days_ahead)).strftime("%d/%m/%Y")
-    print(f"🎾  Reserving Court {court} at {hour} on {date_str}")
+    hour_tuple = parse_hour(hour)
+    if hour_tuple is None:
+        return {"success": False, "message": f"❌ '{hour}' no es una hora válida (formato HH:MM)", "screenshot": None}
+    if not str(court).strip().isdigit():
+        return {"success": False, "message": f"❌ '{court}' no es un número de cancha válido", "screenshot": None}
+    court_num = int(court)
+
+    target = datetime.now(TZ) + timedelta(days=days_ahead)
+    date_str = target.strftime("%d/%m/%Y")
+    target_short = target.strftime("%d/%m/%y")
+    print(f"🎾  Reserving Cancha {court_num} at {fmt_hour(hour_tuple)} on {date_str}")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -61,84 +202,45 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
             await page.wait_for_load_state("networkidle")
             print(f"   ✔ → {page.url}")
 
-            # ── 3. SELECT LADRILLO ────────────────────────────────────────────
-            print("3️⃣  Selecting LADRILLO …")
-            await page.locator("#vTIPOCANCHAID").select_option(label="LADRILLO")
-            await asyncio.sleep(3)
-            await page.wait_for_load_state("networkidle")
-            print("   ✔ LADRILLO selected")
+            # ── 3. FIND THE COURT, WHICHEVER SURFACE IT'S ON ──────────────────
+            options = await surface_options(page)
+            if not options:
+                await screenshot(page, "03_FAIL_no_surfaces", screenshot_dir)
+                raise RuntimeError("❌ No encontré el selector de tipo de cancha")
+            if surface:
+                wanted = surface.strip().upper()
+                options = [(v, l) for v, l in options if l.upper() == wanted]
+                if not options:
+                    raise RuntimeError(f"❌ No existe la superficie '{surface}'")
 
-            # Navigate to target date, clicking "Siguiente" forward as many times as needed
-            target_short = (datetime.now(TZ) + timedelta(days=days_ahead)).strftime("%d/%m/%y")
-            max_clicks = max(days_ahead + 2, 5)
-            for click_num in range(max_clicks):
-                page_text = await page.inner_text("body")
-                if target_short in page_text:
-                    print(f"   ✔ On {target_short}" + (f" (after {click_num} clicks)" if click_num else " (already there)"))
-                    break
-                await page.locator("#BTNBTNSIGUIENTE").click()
-                await asyncio.sleep(2)
-                await page.wait_for_load_state("networkidle")
-            else:
-                await screenshot(page, "03_FAIL_date_not_found", screenshot_dir)
-                raise RuntimeError(f"❌ No pude navegar hasta la fecha {target_short}")
+            print(f"3️⃣  Looking for Cancha {court_num} across {len(options)} surface(s): "
+                  f"{', '.join(label for _, label in options)}")
+            row, found_on, states = await find_court_across_surfaces(
+                page, hour_tuple, court_num, options, target_short, days_ahead
+            )
+
+            if row is None:
+                await screenshot(page, "03_FAIL_no_row", screenshot_dir)
+                surface_list = ", ".join(label for _, label in options)
+                if "taken" in states:
+                    raise RuntimeError(
+                        f"❌ Cancha {court_num} a las {fmt_hour(hour_tuple)} ya no está disponible "
+                        f"(reservada por otra persona)"
+                    )
+                if all(st == "no-date" for st in states):
+                    raise RuntimeError(f"❌ No pude navegar hasta la fecha {target_short}")
+                if all(st == "no-grid" for st in states):
+                    raise RuntimeError("❌ Grid rows not found")
+                raise RuntimeError(
+                    f"❌ No encontré Cancha {court_num} a las {fmt_hour(hour_tuple)} en ninguna "
+                    f"superficie ({surface_list})"
+                )
+            print(f"   ✔ Cancha {court_num} is on {found_on}")
             await screenshot(page, "03_schedule", screenshot_dir)
 
-            # ── 4. FIND & CLICK RESERVAR FOR TARGET COURT + HOUR ──────────────
-            print(f"4️⃣  Finding Cancha {court} at {hour} …")
-            row_selector = "[id*='Gridsdthorasdeldia_horassContainerRow']"
-            try:
-                await page.locator(row_selector).first.wait_for(timeout=10000)
-            except PlaywrightTimeout:
-                grid_ids = await page.evaluate("""() =>
-                    [...document.querySelectorAll('[id]')]
-                        .map(el => el.id)
-                        .filter(id => id.toLowerCase().includes('grid') || id.toLowerCase().includes('row'))
-                        .slice(0, 20)
-                """)
-                print("   Grid IDs found:", grid_ids)
-                await screenshot(page, "04_FAIL_no_grid", screenshot_dir)
-                raise RuntimeError("❌ Grid rows not found")
-
-            rows = page.locator(row_selector)
-            row_count = await rows.count()
-            print(f"   Found {row_count} rows")
-
-            clicked = False
-            unavailable = False
-            for i in range(row_count):
-                row = rows.nth(i)
-                text = await row.inner_text()
-                if hour in text and court in text:
-                    btn = row.locator("input[type=button], button, a").first
-                    if not await btn.is_visible():
-                        print(f"   • Row {i} matched {hour} + Cancha {court} but its Reserva link is hidden (already booked?)")
-                        unavailable = True
-                        continue
-                    await btn.click(timeout=5000)
-                    print(f"   ✔ Clicked row {i} → matched {hour} + Cancha {court}")
-                    clicked = True
-                    break
-            if not clicked:
-                for i in range(row_count):
-                    row = rows.nth(i)
-                    text = await row.inner_text()
-                    if hour in text:
-                        btn = row.locator("input[type=button], button, a").first
-                        if not await btn.is_visible():
-                            print(f"   • Row {i} matched {hour} but its Reserva link is hidden (already booked?)")
-                            unavailable = True
-                            continue
-                        await btn.click(timeout=5000)
-                        print(f"   ✔ Clicked row {i} → matched {hour} only")
-                        clicked = True
-                        break
-            if not clicked:
-                await screenshot(page, "04_FAIL_no_row", screenshot_dir)
-                if unavailable:
-                    raise RuntimeError(f"❌ Cancha {court} a las {hour} ya no está disponible (reservada por otra persona)")
-                raise RuntimeError(f"❌ No row found for {hour} Cancha {court}")
-
+            # ── 4. CLICK RESERVAR ON THAT ROW ─────────────────────────────────
+            print(f"4️⃣  Reserving Cancha {court_num} ({found_on}) at {fmt_hour(hour_tuple)} …")
+            await row.locator("input[type=button], button, a").first.click(timeout=5000)
             await asyncio.sleep(2)
             await page.wait_for_load_state("networkidle")
             await screenshot(page, "04_after_row_click", screenshot_dir)
@@ -250,7 +352,7 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
                 pass
             final_shot = await screenshot(confirm_page, "09_final", screenshot_dir)
 
-            message = f"Cancha {court} el {date_str} a las {hour} con {partner}"
+            message = f"Cancha {court_num} ({found_on}) el {date_str} a las {fmt_hour(hour_tuple)} con {partner}"
             print(f"\n✅  Done! {message}")
             return {"success": True, "message": message, "screenshot": final_shot}
 
@@ -278,6 +380,7 @@ if __name__ == "__main__":
         hour=os.environ.get("HOUR", "10:00"),
         days_ahead=int(os.environ.get("DAYS_AHEAD", "1")),
         partner=os.environ.get("PARTNER", "Kevin Monzon"),
+        surface=os.environ.get("SURFACE") or None,
     ))
     print(result)
     if not result["success"]:

@@ -131,7 +131,8 @@ async def reservarfecha_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 4:
         await update.message.reply_text(
             "Uso: /reservarfecha DD/MM HH:MM cancha nombreDelPartner\n"
-            "Ej: /reservarfecha 15/09 19:00 5 Kevin Monzon"
+            "Ej: /reservarfecha 15/09 19:00 5 Kevin Monzon\n"
+            "La cancha es el número, de ladrillo o de cemento — lo busco solo."
         )
         return
     date_str, hour, court, *partner_parts = args
@@ -275,6 +276,8 @@ async def ayuda_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2️⃣ Programá una reserva para una fecha puntual:\n"
         "`/reservarfecha DD/MM HH:MM cancha partner`\n"
         "Ej: `/reservarfecha 15/09 19:00 5 Kevin Monzon`\n\n"
+        "La cancha es simplemente su número — sirve tanto para las de ladrillo "
+        "como para las de cemento, el bot se da cuenta sola de cuál es.\n\n"
         "Esto no reserva ahora: espera y reserva automáticamente a las 08:00 del día "
         "anterior (cuando la cancha abre esa fecha), aunque el bot se haya reiniciado "
         "en el medio.\n\n"
