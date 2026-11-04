@@ -1,5 +1,6 @@
 import json
 import logging
+import sys
 import os
 import re
 from datetime import date as date_cls, datetime, time, timedelta
@@ -13,7 +14,13 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 from reserve import run_reservation
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    stream=sys.stdout,  # stderr shows up red in Railway as if everything were an error
+)
+# httpx logs every request URL at INFO, and Telegram URLs embed the bot token.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("tennis-bot")
 
 TZ = ZoneInfo("America/Montevideo")
