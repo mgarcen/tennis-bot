@@ -221,20 +221,23 @@ async def open_schedule(page, username, password, lap=print):
     # ── 1. LOGIN ──────────────────────────────────────────────────────
     lap("1️⃣  Logging in …")
     await page.goto(f"{BASE_URL}/login.aspx", wait_until="networkidle")
-    # Real keystrokes (the form validates on key/blur events), just without the
-    # human-speed delay between them.
+    # Kept exactly as the original, proven login: speeding up the typing and dropping
+    # these pauses made DeporYA reject the login (it validates fields as you leave them).
+    # Login speed won't matter once it happens before 08:00.
     await page.locator("#vUSERNAME").click()
-    await page.locator("#vUSERNAME").press_sequentially(username, delay=10)
+    await page.locator("#vUSERNAME").type(username, delay=100)
     await page.locator("#vUSERNAME").press("Tab")
+    await asyncio.sleep(0.5)
     await page.locator("#vUSERPASSWORD").click()
-    await page.locator("#vUSERPASSWORD").press_sequentially(password, delay=10)
+    await page.locator("#vUSERPASSWORD").type(password, delay=100)
     await page.locator("#vUSERPASSWORD").press("Tab")
-    await asyncio.sleep(0.2)
+    await asyncio.sleep(1)
     try:
         async with page.expect_navigation(timeout=20000):
             await page.locator("#BTNENTER").click()
     except PlaywrightTimeout:
         pass
+    await asyncio.sleep(2)
     await page.wait_for_load_state("networkidle")
     if "login" in page.url.lower():
         raise RuntimeError("❌ Login failed")
