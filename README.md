@@ -44,8 +44,14 @@ Row matching is exact on both number and time: `row_courts()` strips times out o
 row text before reading court numbers, so a request for court 5 is never satisfied by
 the `5` in `15:00` or by `Cancha 15`, and a request for an hour has to match a real time
 token in the row. `test_matching.py` covers those cases — run `python3 test_matching.py`
-after touching that logic. If a court genuinely isn't free, the run fails and says so
-rather than booking a different court.
+after touching that logic.
+
+If the requested court is already booked at that hour, the bot books another court at
+the **same hour on the same surface**, picking the closest court number (lower wins a
+tie), and the Telegram message says which court it took instead. The court's surface is
+whichever one lists that court at any hour of the day, so this still works if the site
+hides a booked slot entirely. It never switches surface or hour; if nothing else on that
+surface is free at that hour, the run fails and says so.
 
 ## Multi-user access
 

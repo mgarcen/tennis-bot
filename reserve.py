@@ -80,13 +80,20 @@ async def goto_target_date(page, target_short, days_ahead):
     return None
 
 
-async def find_court_row(page, hour_tuple, court_num):
-    """Find the grid row for this exact court + hour on the surface now showing.
+async def scan_surface(page, hour_tuple, court_num):
+    """Read the grid of the surface now showing, for one hour.
 
-    Returns (row, state): state is "free" (bookable, row returned), "taken" (the row
-    exists but its Reserva link is hidden, so someone else has it) or "missing" (this
-    surface has no such court/hour).
+    Returns a dict:
+      state      "free" (requested court bookable), "taken" (its row is there but the
+                 Reserva link is hidden), "missing" (no row for it at that hour) or
+                 "no-grid" (no rows at all, i.e. the markup changed)
+      row        the requested court's row when state is "free"
+      home       True if the requested court appears on this surface at any hour; court
+                 numbers are unique, so that is how we know which surface it lives on
+                 even when the site hides a booked slot entirely
+      others     [(court, row)] other courts free at that hour on this surface
     """
+    result = {"state": "missing", "row": None, "home": False, "others": []}
     try:
         await page.locator(ROW_SELECTOR).first.wait_for(timeout=10000)
     except PlaywrightTimeout:
@@ -98,36 +105,52 @@ async def find_court_row(page, hour_tuple, court_num):
                 .slice(0, 20)
         """)
         print("      no grid rows; candidate ids:", grid_ids)
-        return None, "no-grid"
+        result["state"] = "no-grid"
+        return result
 
     rows = page.locator(ROW_SELECTOR)
     row_count = await rows.count()
     print(f"      {row_count} rows")
 
-    state = "missing"
     for i in range(row_count):
         row = rows.nth(i)
         text = await row.inner_text()
-        if hour_tuple not in row_hours(text) or court_num not in row_courts(text):
+        courts = row_courts(text)
+        if court_num in courts:
+            result["home"] = True
+        if hour_tuple not in row_hours(text):
             continue
-        btn = row.locator("input[type=button], button, a").first
-        if not await btn.is_visible():
-            print(f"      • row {i} is Cancha {court_num} at {fmt_hour(hour_tuple)}, Reserva link hidden (already booked)")
-            state = "taken"
-            continue
-        print(f"      ✔ row {i} → Cancha {court_num} at {fmt_hour(hour_tuple)}")
-        return row, "free"
-    return None, state
+        free = await row.locator("input[type=button], button, a").first.is_visible()
+        if court_num in courts:
+            if free:
+                print(f"      ✔ row {i} → Cancha {court_num} at {fmt_hour(hour_tuple)}")
+                result["state"], result["row"] = "free", row
+            else:
+                print(f"      • row {i} is Cancha {court_num} at {fmt_hour(hour_tuple)}, "
+                      f"Reserva link hidden (already booked)")
+                if result["state"] != "free":
+                    result["state"] = "taken"
+        elif free and len(courts) == 1:
+            result["others"].append((courts[0], row))
+    return result
+
+
+def pick_substitute(court_num, others):
+    """The free court closest in number to the one requested (lower wins a tie)."""
+    if not others:
+        return None
+    return min(others, key=lambda c: (abs(c[0] - court_num), c[0]))
 
 
 async def find_court_across_surfaces(page, hour_tuple, court_num, options,
                                      target_short, days_ahead):
-    """Search each surface in turn for this court + hour.
+    """Search each surface for this court + hour, falling back to its own surface.
 
-    Returns (row, label, states): `row` is the bookable row and `label` the surface it
-    was found on, or (None, None, states) if no surface had it free. `states` holds one
-    outcome per surface tried, so the caller can tell "someone booked it" apart from
-    "that court doesn't exist here" and from the site having changed.
+    Returns (row, label, states, booked_court). If the requested court is free it is
+    `booked_court`. If it is taken, or its slot is hidden, the closest-numbered court
+    free at the same hour on the same surface is returned instead. (None, None, states,
+    None) means nothing bookable: `states` holds one outcome per surface tried, with
+    "full" meaning the court's surface had nothing else free at that hour.
     """
     states = []
     for value, label in options:
@@ -137,11 +160,24 @@ async def find_court_across_surfaces(page, hour_tuple, court_num, options,
             print(f"      • could not reach {target_short} on {label}")
             states.append("no-date")
             continue
-        row, state = await find_court_row(page, hour_tuple, court_num)
-        states.append(state)
-        if state == "free":
-            return row, label, states
-    return None, None, states
+        scan = await scan_surface(page, hour_tuple, court_num)
+        if scan["state"] == "free":
+            states.append("free")
+            return scan["row"], label, states, court_num
+        if not scan["home"] and scan["state"] != "taken":
+            states.append(scan["state"])
+            continue
+        # The requested court lives on this surface but isn't bookable: take another here.
+        pick = pick_substitute(court_num, scan["others"])
+        if pick:
+            print(f"      ↪ Cancha {court_num} not available; Cancha {pick[0]} is free "
+                  f"on {label} at {fmt_hour(hour_tuple)}")
+            states.append("substitute")
+            return pick[1], label, states, pick[0]
+        print(f"      • no other court free on {label} at {fmt_hour(hour_tuple)}")
+        states.append("full")
+        return None, label, states, None
+    return None, None, states, None
 
 
 async def run_reservation(username, password, court="5", hour="10:00", days_ahead=1,
@@ -215,13 +251,18 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
 
             print(f"3️⃣  Looking for Cancha {court_num} across {len(options)} surface(s): "
                   f"{', '.join(label for _, label in options)}")
-            row, found_on, states = await find_court_across_surfaces(
+            row, found_on, states, booked_court = await find_court_across_surfaces(
                 page, hour_tuple, court_num, options, target_short, days_ahead
             )
 
             if row is None:
                 await screenshot(page, "03_FAIL_no_row", screenshot_dir)
                 surface_list = ", ".join(label for _, label in options)
+                if "full" in states:
+                    raise RuntimeError(
+                        f"❌ Cancha {court_num} a las {fmt_hour(hour_tuple)} ya está reservada y no "
+                        f"hay otra cancha libre en {found_on} a esa hora"
+                    )
                 if "taken" in states:
                     raise RuntimeError(
                         f"❌ Cancha {court_num} a las {fmt_hour(hour_tuple)} ya no está disponible "
@@ -235,11 +276,13 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
                     f"❌ No encontré Cancha {court_num} a las {fmt_hour(hour_tuple)} en ninguna "
                     f"superficie ({surface_list})"
                 )
-            print(f"   ✔ Cancha {court_num} is on {found_on}")
+            substituted = booked_court != court_num
+            print(f"   ✔ Booking Cancha {booked_court} on {found_on}"
+                  + (f" (instead of Cancha {court_num})" if substituted else ""))
             await screenshot(page, "03_schedule", screenshot_dir)
 
             # ── 4. CLICK RESERVAR ON THAT ROW ─────────────────────────────────
-            print(f"4️⃣  Reserving Cancha {court_num} ({found_on}) at {fmt_hour(hour_tuple)} …")
+            print(f"4️⃣  Reserving Cancha {booked_court} ({found_on}) at {fmt_hour(hour_tuple)} …")
             await row.locator("input[type=button], button, a").first.click(timeout=5000)
             await asyncio.sleep(2)
             await page.wait_for_load_state("networkidle")
@@ -352,7 +395,9 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
                 pass
             final_shot = await screenshot(confirm_page, "09_final", screenshot_dir)
 
-            message = f"Cancha {court_num} ({found_on}) el {date_str} a las {fmt_hour(hour_tuple)} con {partner}"
+            message = f"Cancha {booked_court} ({found_on}) el {date_str} a las {fmt_hour(hour_tuple)} con {partner}"
+            if substituted:
+                message += f" — la Cancha {court_num} estaba ocupada, reservé la {booked_court}"
             print(f"\n✅  Done! {message}")
             return {"success": True, "message": message, "screenshot": final_shot}
 

@@ -166,14 +166,14 @@ def sweep(surfaces, court=5, hour=(19, 0), reachable=True):
     by_value = {f"v{i}": label for i, label in enumerate(surfaces)}
     page = FakePage(surfaces, by_value, reachable=reachable)
     options = [(v, l) for v, l in by_value.items()]
-    row, label, states = asyncio.run(
+    row, label, states, booked = asyncio.run(
         find_court_across_surfaces(page, hour, court, options, "04/11/26", 1)
     )
-    return (row is not None), label, states
+    return (row is not None), label, states, booked
 
 
 # Court 5 lives on ladrillo; the sweep must skip cemento and find it there.
-found, label, states = sweep({
+found, label, states, booked = sweep({
     "CEMENTO": [FakeRow("19:00\tCancha 1\tCEMENTO\tReservar"),
                 FakeRow("19:00\tCancha 2\tCEMENTO\tReservar")],
     "LADRILLO": [FakeRow("19:00\tCancha 5\tLADRILLO\tReservar")],
@@ -182,7 +182,7 @@ case("sweep finds court 5 on the second surface", (found, label), (True, "LADRIL
 case("sweep reports it missing on the first", states[0], "missing")
 
 # Court 2 is on cemento — the first surface tried — so ladrillo is never visited.
-found, label, states = sweep({
+found, label, states, booked = sweep({
     "CEMENTO": [FakeRow("19:00\tCancha 2\tCEMENTO\tReservar")],
     "LADRILLO": [FakeRow("19:00\tCancha 5\tLADRILLO\tReservar")],
 }, court=2)
@@ -190,33 +190,73 @@ case("sweep finds a cemento court", (found, label), (True, "CEMENTO"))
 case("sweep stops at the first hit", len(states), 1)
 
 # The court exists but its Reserva link is hidden: taken, not missing.
-found, label, states = sweep({
+found, label, states, booked = sweep({
     "CEMENTO": [FakeRow("19:00\tCancha 1\tCEMENTO")],
     "LADRILLO": [FakeRow("19:00\tCancha 5\tLADRILLO", visible=False)],
 })
-case("hidden Reserva link reports taken", (found, "taken" in states), (False, True))
+case("taken court with nothing else free on its surface reports full",
+     (found, states[-1]), (False, "full"))
 
 # Nobody has that court at that hour.
-found, label, states = sweep({
+found, label, states, booked = sweep({
     "CEMENTO": [FakeRow("19:00\tCancha 1\tCEMENTO")],
     "LADRILLO": [FakeRow("19:00\tCancha 6\tLADRILLO")],
 })
 case("court on no surface is missing everywhere", (found, set(states)), (False, {"missing"}))
 
 # An empty grid is a markup problem, reported separately from a busy court.
-found, label, states = sweep({"CEMENTO": [], "LADRILLO": []})
+found, label, states, booked = sweep({"CEMENTO": [], "LADRILLO": []})
 case("empty grid reports no-grid", set(states), {"no-grid"})
 
 # The target date never shows up.
-found, label, states = sweep({"CEMENTO": [FakeRow("19:00\tCancha 5")]}, reachable=False)
+found, label, states, booked = sweep({"CEMENTO": [FakeRow("19:00\tCancha 5")]}, reachable=False)
 case("unreachable date reports no-date", set(states), {"no-date"})
 
 # A 15:00 row must not satisfy a request for court 5 at 19:00 end to end.
-found, label, states = sweep({
+found, label, states, booked = sweep({
     "CEMENTO": [FakeRow("15:00\tCancha 3\tCEMENTO\tReservar")],
     "LADRILLO": [FakeRow("15:00\tCancha 3\tLADRILLO\tReservar")],
 })
 case("no false hit from the 5 in 15:00", found, False)
+
+
+# ── Fallback to another court on the same surface ───────────────────────────────
+
+# Court 5 is taken; 4 and 7 are free on ladrillo, cemento's court 2 must not be used.
+found, label, states, booked = sweep({
+    "CEMENTO": [FakeRow("19:00\tCancha 2\tCEMENTO\tReservar")],
+    "LADRILLO": [FakeRow("19:00\tCancha 5\tLADRILLO", visible=False),
+                 FakeRow("19:00\tCancha 7\tLADRILLO\tReservar"),
+                 FakeRow("19:00\tCancha 4\tLADRILLO\tReservar")],
+})
+case("taken court falls back on its own surface", (found, label, booked), (True, "LADRILLO", 4))
+case("fallback is reported as a substitute", states[-1], "substitute")
+
+# The site hides the booked 19:00 slot entirely; the 20:00 row shows court 5 is ladrillo.
+found, label, states, booked = sweep({
+    "CEMENTO": [FakeRow("19:00\tCancha 2\tCEMENTO\tReservar")],
+    "LADRILLO": [FakeRow("20:00\tCancha 5\tLADRILLO\tReservar"),
+                 FakeRow("19:00\tCancha 6\tLADRILLO\tReservar")],
+})
+case("hidden slot still resolves the court's surface", (found, label, booked), (True, "LADRILLO", 6))
+
+# Other courts are free only at other hours, or taken: nothing to fall back on.
+found, label, states, booked = sweep({
+    "LADRILLO": [FakeRow("19:00\tCancha 5\tLADRILLO", visible=False),
+                 FakeRow("19:00\tCancha 6\tLADRILLO", visible=False),
+                 FakeRow("20:00\tCancha 7\tLADRILLO\tReservar")],
+})
+case("no fallback at a different hour", (found, booked, states[-1]), (False, None, "full"))
+
+# The requested court is free: never substitute.
+found, label, states, booked = sweep({
+    "LADRILLO": [FakeRow("19:00\tCancha 4\tLADRILLO\tReservar"),
+                 FakeRow("19:00\tCancha 5\tLADRILLO\tReservar")],
+})
+case("free requested court is booked as asked", booked, 5)
+
+case("closest number wins, lower on a tie",
+     reserve.pick_substitute(5, [(7, "r7"), (3, "r3"), (6, "r6"), (4, "r4")]), (4, "r4"))
 
 
 if __name__ == "__main__":
