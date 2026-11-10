@@ -6,7 +6,7 @@ people, each with their own DeporYA login.
 ## Files
 - `reserve.py` — Playwright flow that logs in and books a court (`run_reservation(...)`).
 - `test_matching.py` — tests for the grid-row court/hour matching in `reserve.py`.
-- `bot.py` — multi-user Telegram bot (`/login`, `/reservarfecha`, `/status`, `/cancelar`, `/socios`) + APScheduler.
+- `bot.py` — multi-user Telegram bot (`/login`, `/reservar`, `/reservarfecha`, `/status`, `/cancelar`, `/socios`) + APScheduler.
 - `users.json` — per-chat account data (DeporYA credentials, saved partners, pending bookings). Git-ignored; written by the bot at `STATE_DIR/users.json`.
 
 ## How reservations work
@@ -62,7 +62,7 @@ this is the gate for sharing it with someone else. To add a person:
 3. They message the bot and run `/login theirDeporYAuser theirDeporYApassword` — the
    bot immediately deletes that message from the chat for privacy and stores the
    credentials under their own chat ID, isolated from everyone else's.
-4. They run `/reservarfecha DD/MM HH:MM cancha partner` to schedule their own booking.
+4. They run `/reservar` (or `/reservarfecha DD/MM HH:MM cancha partner`) to schedule their own booking.
 
 Removing someone: delete their ID from `ALLOWED_CHAT_IDS` — their pending bookings stop
 firing (their `users.json` entry is skipped once their chat ID isn't in the allowlist).
@@ -73,6 +73,7 @@ DeporYA login.
 
 ## Telegram commands
 - `/login usuario contraseña` — save your own DeporYA credentials (required once, before `/reservarfecha`).
+- `/reservar` — book by tapping buttons: day (next 7 days), hour, court, partner (from your saved list), then confirm. Each step has ‹ Atrás / ✖ Cancelar, and "✏️ Otra/Otro" lets you type an hour, court or partner the buttons don't list. A partner typed there is saved for next time.
 - `/reservarfecha DD/MM HH:MM cancha partner` — e.g. `/reservarfecha 15/09 19:00 5 Kevin Monzon`. One-time booking for a specific future date; fires automatically at 08:00 the morning it opens. `cancha` is just the court number, ladrillo or cemento.
 - `/status` — lists your pending scheduled bookings.
 - `/cancelar DD/MM` — cancels the pending booking for that date.
@@ -87,6 +88,8 @@ DeporYA login.
 3. Add environment variables in the Railway service settings:
    - `TELEGRAM_BOT_TOKEN` — from @BotFather.
    - `ALLOWED_CHAT_IDS` — comma-separated Telegram chat IDs allowed to use the bot (start with your own).
+   - `BOOKING_HOURS` *(optional)* — hours offered as `/reservar` buttons, as on-the-hour ranges, e.g. `7-22` (default) or `8-12,17-22`.
+   - `BOOKING_COURTS` *(optional)* — court numbers offered as buttons, e.g. `1-8` (default) or `1-4,7`.
 4. **Recommended:** attach a Railway Volume (e.g. mounted at `/data`) and set `STATE_DIR=/data`, so `users.json` (everyone's saved logins/pending bookings) survives redeploys instead of resetting each time the container rebuilds.
 5. Railway keeps the process alive 24/7; `bot.py` runs Telegram long-polling and APScheduler fires each person's pending bookings at their scheduled wake-up time.
 

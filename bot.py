@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import sys
@@ -9,8 +11,15 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from reserve import run_reservation
 
@@ -122,7 +131,7 @@ async def login_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.warning("Could not delete /login message containing credentials")
     await context.bot.send_message(
         chat_id=chat_id,
-        text="✅ Credenciales guardadas (borré tu mensaje). Usá /reservarfecha para programar una reserva.",
+        text="✅ Credenciales guardadas (borré tu mensaje). Usá /reservar para programar una reserva.",
     )
 
 
@@ -160,6 +169,15 @@ async def reservarfecha_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ La fecha tiene que ser a partir de mañana.")
         return
 
+    await update.message.reply_text(
+        schedule_booking(context.application, chat_id, target_date, hour, court, partner)
+    )
+
+
+def schedule_booking(app: Application, chat_id: int, target_date: date_cls,
+                     hour: str, court: str, partner: str) -> str:
+    """Save and arm a booking (replacing any for that date); returns the reply text."""
+    u = get_user(chat_id)
     run_at = datetime.combine(target_date - timedelta(days=1), time(8, 0, 0), tzinfo=TZ)
     entry = {
         "date": target_date.strftime("%d/%m/%Y"),
@@ -174,18 +192,13 @@ async def reservarfecha_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u["partners"].append(partner)
     save_users(users)
 
-    schedule_pending_job(context.application, chat_id, entry)
+    schedule_pending_job(app, chat_id, entry)
 
+    summary = f"🏟️ Cancha {court} · 🕗 {hour} · 📅 {entry['date']} · 🤝 {partner}"
     if run_at <= datetime.now(TZ):
-        await update.message.reply_text(
-            f"✅ Ya está abierto — reservando ahora:\n"
-            f"🏟️ Cancha {court} · 🕗 {hour} · 📅 {entry['date']} · 🤝 {partner}"
-        )
-    else:
-        await update.message.reply_text(
-            f"✅ Programado — el {run_at.strftime('%d/%m')} a las 08:00 reservo automáticamente:\n"
-            f"🏟️ Cancha {court} · 🕗 {hour} · 📅 {entry['date']} · 🤝 {partner}"
-        )
+        return f"✅ Ya está abierto — reservando ahora:\n{summary}"
+    return (f"✅ Programado — el {run_at.strftime('%d/%m')} a las 08:00 reservo automáticamente:\n"
+            f"{summary}")
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -197,7 +210,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not u["pending"]:
         await update.message.reply_text(
-            "📋 No tenés ninguna reserva programada.\nUsá /reservarfecha DD/MM HH:MM cancha partner"
+            "📋 No tenés ninguna reserva programada.\nUsá /reservar para programar una."
         )
         return
     lines = [f"  • {p['date']} — Cancha {p['court']} {p['hour']} con {p['partner']}" for p in u["pending"]]
@@ -272,6 +285,198 @@ async def socios_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# ── /reservar: tap-through booking ───────────────────────────────────────────
+# Each step edits the same message with the next set of buttons. Choices so far live in
+# context.user_data["rv"]; if the bot restarts mid-flow they're gone and the user is
+# asked to start again. "Otra/Otro" lets you type a value the buttons don't offer.
+
+WEEKDAYS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+BOOKING_DAYS = 7  # how many days ahead the day picker offers, starting tomorrow
+
+
+def _parse_range(spec: str) -> list[int]:
+    """'1-8' or '1,2,5-7' → [1, 2, 5, 6, 7]."""
+    out = []
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            a, b = part.split("-", 1)
+            out.extend(range(int(a), int(b) + 1))
+        elif part:
+            out.append(int(part))
+    return out
+
+
+# Hours and courts offered as buttons; set BOOKING_HOURS / BOOKING_COURTS in Railway to change.
+HOUR_CHOICES = [f"{h:02d}:00" for h in _parse_range(os.environ.get("BOOKING_HOURS", "7-22"))]
+COURT_CHOICES = [str(c) for c in _parse_range(os.environ.get("BOOKING_COURTS", "1-8"))]
+
+
+def _rows(buttons, per_row):
+    return [buttons[i:i + per_row] for i in range(0, len(buttons), per_row)]
+
+
+def _btn(label, data):
+    return InlineKeyboardButton(label, callback_data=f"rv:{data}")
+
+
+NAV_BACK = _btn("‹ Atrás", "back")
+NAV_CANCEL = _btn("✖ Cancelar", "x")
+
+
+def _day_label(d: date_cls) -> str:
+    return f"{WEEKDAYS[d.weekday()]} {d.strftime('%d/%m')}"
+
+
+def _wizard_view(u: dict, rv: dict):
+    """(text, keyboard) for whichever step the flow is on."""
+    step = rv["step"]
+    if step == "day":
+        tomorrow = datetime.now(TZ).date() + timedelta(days=1)
+        days = [tomorrow + timedelta(days=i) for i in range(BOOKING_DAYS)]
+        buttons = [_btn(_day_label(d), f"d:{d.isoformat()}") for d in days]
+        return "📅 ¿Qué día?", InlineKeyboardMarkup(_rows(buttons, 4) + [[NAV_CANCEL]])
+
+    day = date_cls.fromisoformat(rv["date"])
+    so_far = f"📅 {_day_label(day)}"
+    if step == "hour":
+        buttons = [_btn(h, f"h:{h}") for h in HOUR_CHOICES] + [_btn("✏️ Otra", "h:?")]
+        return f"{so_far}\n🕐 ¿Hora?", InlineKeyboardMarkup(_rows(buttons, 4) + [[NAV_BACK, NAV_CANCEL]])
+
+    so_far += f" · 🕐 {rv['hour']}"
+    if step == "court":
+        buttons = [_btn(c, f"c:{c}") for c in COURT_CHOICES] + [_btn("✏️ Otra", "c:?")]
+        return f"{so_far}\n🎾 ¿Cancha?", InlineKeyboardMarkup(_rows(buttons, 4) + [[NAV_BACK, NAV_CANCEL]])
+
+    so_far += f" · 🎾 Cancha {rv['court']}"
+    if step == "partner":
+        buttons = [_btn(name, f"p:{i}") for i, name in enumerate(u["partners"])]
+        buttons.append(_btn("✏️ Otro", "p:?"))
+        return f"{so_far}\n🤝 ¿Con quién?", InlineKeyboardMarkup(_rows(buttons, 2) + [[NAV_BACK, NAV_CANCEL]])
+
+    # confirm
+    text = f"{so_far} · 🤝 {rv['partner']}\n\n¿Confirmo?"
+    if any(p["date"] == day.strftime("%d/%m/%Y") for p in u["pending"]):
+        text += "\n⚠️ Ya tenés una reserva programada ese día; esta la reemplaza."
+    keyboard = [[_btn("✅ Confirmar", "ok"), NAV_BACK, NAV_CANCEL]]
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+# What "‹ Atrás" goes back to from each step (and from typing a custom value).
+PREV_STEP = {"hour": "day", "court": "hour", "partner": "court", "confirm": "partner",
+             "type-hour": "hour", "type-court": "court", "type-partner": "partner"}
+TYPE_PROMPTS = {
+    "type-hour": "✏️ Escribí la hora (HH:MM, ej: 19:30):",
+    "type-court": "✏️ Escribí el número de cancha:",
+    "type-partner": "✏️ Escribí nombre y apellido del partner (como figura en DeporYA):",
+}
+
+
+async def reservar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _authorized(update):
+        return
+    u = get_user(update.effective_chat.id)
+    if not u.get("tennis_user"):
+        await update.message.reply_text("Primero iniciá sesión: /login usuarioDeporYA contraseña")
+        return
+    rv = context.user_data["rv"] = {"step": "day"}
+    text, keyboard = _wizard_view(u, rv)
+    msg = await update.message.reply_text(text, reply_markup=keyboard)
+    rv["message_id"] = msg.message_id
+
+
+async def reservar_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _authorized(update):
+        await query.answer()
+        return
+    chat_id = update.effective_chat.id
+    u = get_user(chat_id)
+    rv = context.user_data.get("rv")
+    action = query.data.removeprefix("rv:")
+
+    # Buttons from an older /reservar (or from before a restart) no longer apply.
+    if not rv or rv.get("message_id") != query.message.message_id:
+        await query.answer("Este menú ya no está activo, usá /reservar de nuevo.", show_alert=True)
+        return
+    await query.answer()
+
+    if action == "x":
+        context.user_data.pop("rv", None)
+        await query.edit_message_text("🚫 Reserva cancelada.")
+        return
+    if action == "back":
+        rv["step"] = PREV_STEP.get(rv["step"], "day")
+    elif action == "ok":
+        context.user_data.pop("rv", None)
+        target_date = date_cls.fromisoformat(rv["date"])
+        reply = schedule_booking(context.application, chat_id, target_date,
+                                 rv["hour"], rv["court"], rv["partner"])
+        await query.edit_message_text(reply)
+        return
+    else:
+        kind, _, value = action.partition(":")
+        if value == "?":
+            rv["step"] = {"h": "type-hour", "c": "type-court", "p": "type-partner"}[kind]
+            await query.edit_message_text(TYPE_PROMPTS[rv["step"]],
+                                          reply_markup=InlineKeyboardMarkup([[NAV_BACK, NAV_CANCEL]]))
+            return
+        if kind == "d":
+            rv["date"], rv["step"] = value, "hour"
+        elif kind == "h":
+            rv["hour"], rv["step"] = value, "court"
+        elif kind == "c":
+            rv["court"], rv["step"] = value, "partner"
+        elif kind == "p":
+            idx = int(value)
+            if idx >= len(u["partners"]):
+                rv["step"] = "partner"  # list changed under us; show it again
+            else:
+                rv["partner"], rv["step"] = u["partners"][idx], "confirm"
+
+    text, keyboard = _wizard_view(u, rv)
+    await query.edit_message_text(text, reply_markup=keyboard)
+
+
+async def reservar_typed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Plain text while /reservar is waiting for a typed hour, court or partner."""
+    if not _authorized(update):
+        return
+    rv = context.user_data.get("rv")
+    if not rv or not rv["step"].startswith("type-"):
+        return
+    u = get_user(update.effective_chat.id)
+    value = update.message.text.strip()
+
+    if rv["step"] == "type-hour":
+        if not HOUR_RE.match(value):
+            await update.message.reply_text("❌ Formato HH:MM, ej: 19:30. Probá de nuevo:")
+            return
+        h, m = (int(x) for x in value.split(":"))
+        if h > 23 or m > 59:
+            await update.message.reply_text("❌ Esa hora no existe. Probá de nuevo:")
+            return
+        rv["hour"], rv["step"] = f"{h:02d}:{m:02d}", "court"
+    elif rv["step"] == "type-court":
+        if not value.isdigit():
+            await update.message.reply_text("❌ Tiene que ser un número. Probá de nuevo:")
+            return
+        rv["court"], rv["step"] = str(int(value)), "partner"
+    else:
+        rv["partner"], rv["step"] = " ".join(value.split()), "confirm"
+
+    # Retire the old menu and continue in a fresh message below what they typed.
+    try:
+        await context.bot.edit_message_reply_markup(
+            chat_id=update.effective_chat.id, message_id=rv["message_id"], reply_markup=None
+        )
+    except Exception:
+        pass
+    text, keyboard = _wizard_view(u, rv)
+    msg = await update.message.reply_text(text, reply_markup=keyboard)
+    rv["message_id"] = msg.message_id
+
+
 async def ayuda_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update):
         return
@@ -280,8 +485,9 @@ async def ayuda_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1️⃣ Iniciá sesión una vez con tu usuario de DeporYA:\n"
         "`/login usuarioDeporYA contraseña`\n"
         "(borro tu mensaje automáticamente por seguridad)\n\n"
-        "2️⃣ Programá una reserva para una fecha puntual:\n"
-        "`/reservarfecha DD/MM HH:MM cancha partner`\n"
+        "2️⃣ Programá una reserva con /reservar y elegí día, hora, cancha y partner "
+        "con los botones.\n"
+        "O escribiendo todo junto: `/reservarfecha DD/MM HH:MM cancha partner`\n"
         "Ej: `/reservarfecha 15/09 19:00 5 Kevin Monzon`\n\n"
         "La cancha es simplemente su número — sirve tanto para las de ladrillo "
         "como para las de cemento, el bot se da cuenta sola de cuál es.\n\n"
@@ -404,6 +610,9 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("login", login_cmd))
     app.add_handler(CommandHandler("reservarfecha", reservarfecha_cmd))
+    app.add_handler(CommandHandler("reservar", reservar_cmd))
+    app.add_handler(CallbackQueryHandler(reservar_button, pattern=r"^rv:"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reservar_typed))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("cancelar", cancelar_cmd))
     app.add_handler(CommandHandler("socios", socios_cmd))
