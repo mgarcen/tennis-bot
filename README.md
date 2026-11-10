@@ -74,6 +74,7 @@ DeporYA login.
 ## Telegram commands
 - `/login usuario contraseña` — save your own DeporYA credentials (required once, before `/reservarfecha`).
 - `/reservar` — book by tapping buttons: day (next 7 days), hour, court, partner (from your saved list), then confirm. Each step has ‹ Atrás / ✖ Cancelar, and "✏️ Otra/Otro" lets you type an hour, court or partner the buttons don't list. A partner typed there is saved for next time.
+- `/probar` — at the next 08:00 opening, log in at 07:58:30 and watch tomorrow's grid until 08:01:30, reporting a timeline (date visible? rows? Reservar buttons?) with and without reloading. Never books. Refuses on a morning that already has a real booking, since a second login could disturb it. `/probar ahora` just times login + navigation once.
 - `/reservarfecha DD/MM HH:MM cancha partner` — e.g. `/reservarfecha 15/09 19:00 5 Kevin Monzon`. One-time booking for a specific future date; fires automatically at 08:00 the morning it opens. `cancha` is just the court number, ladrillo or cemento.
 - `/status` — lists your pending scheduled bookings.
 - `/cancelar DD/MM` — cancels the pending booking for that date.
@@ -81,6 +82,10 @@ DeporYA login.
 - `/socios agregar Nombre Apellido` — save a partner for quick reuse.
 - `/socios borrar Nombre` — remove a saved partner.
 - `/ayuda` (or `/help`, `/start`) — shows this explanation inside Telegram.
+
+## Speed
+
+The site updates in place over AJAX, so `wait_for_load_state()` can't tell when it's done. Instead of fixed sleeps, `act_and_wait()` waits for the visible text to change, capped at the old sleep. Step screenshots are off unless `SCREENSHOTS=all`; the final and failure ones are always taken. Each step's log line starts with seconds elapsed (`[  7.0s] 5️⃣ …`).
 
 ## Deploy on Railway
 1. Create a Railway account at railway.app.

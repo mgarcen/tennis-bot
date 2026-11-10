@@ -21,7 +21,7 @@ from telegram.ext import (
     filters,
 )
 
-from reserve import run_reservation
+from reserve import run_probe, run_reservation
 
 logging.basicConfig(
     level=logging.INFO,
@@ -477,6 +477,83 @@ async def reservar_typed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rv["message_id"] = msg.message_id
 
 
+# ── /probar: watch the 08:00 opening without booking ─────────────────────────────
+
+PROBE_LEAD = timedelta(seconds=90)  # log in this long before 08:00
+
+
+async def send_probe_report(app: Application, chat_id: int, title: str, result: dict):
+    text = title + "\n\n" + "\n".join(result["lines"])
+    # Telegram caps messages at 4096 characters.
+    for i in range(0, len(text), 3900):
+        await app.bot.send_message(chat_id=chat_id, text=text[i:i + 3900])
+    for shot in result["screenshots"][:4]:
+        if shot and os.path.exists(shot):
+            with open(shot, "rb") as f:
+                await app.bot.send_photo(chat_id=chat_id, photo=f)
+
+
+async def run_probe_job(app: Application, chat_id: int, open_at_iso: str | None):
+    u = get_user(chat_id)
+    open_at = datetime.fromisoformat(open_at_iso) if open_at_iso else None
+    log.info("Running probe for chat %s (open_at=%s)", chat_id, open_at_iso)
+    try:
+        result = await run_probe(u["tennis_user"], u["tennis_pass"], open_at=open_at,
+                                 screenshot_dir=f"screenshots/{chat_id}/probe")
+    except Exception as e:
+        log.exception("Probe crashed for chat %s", chat_id)
+        result = {"success": False, "lines": [f"❌ {e}"], "screenshots": []}
+    title = ("🔎 Prueba de apertura (no reservé nada)" if open_at
+             else "🔎 Prueba rápida (no reservé nada)")
+    try:
+        await send_probe_report(app, chat_id, title, result)
+    except Exception:
+        log.exception("Could not send probe report to chat %s", chat_id)
+
+
+async def probar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _authorized(update):
+        return
+    chat_id = update.effective_chat.id
+    u = get_user(chat_id)
+    if not u.get("tennis_user"):
+        await update.message.reply_text("Primero iniciá sesión: /login usuarioDeporYA contraseña")
+        return
+    app = context.application
+
+    if context.args and context.args[0].lower() == "ahora":
+        await update.message.reply_text("🔎 Probando ahora: entro, abro el día de mañana y te cuento cuánto tardó. No reservo nada.")
+        app.create_task(run_probe_job(app, chat_id, None))
+        return
+
+    now = datetime.now(TZ)
+    open_at = datetime.combine(now.date(), time(8, 0), tzinfo=TZ)
+    if now > open_at - PROBE_LEAD:
+        open_at += timedelta(days=1)
+    # A second login on the same account at 08:00 could knock the real booking's session out.
+    if any(datetime.fromisoformat(p["run_at"]) == open_at for p in u["pending"]):
+        await update.message.reply_text(
+            f"⚠️ El {open_at.strftime('%d/%m')} a las 08:00 ya tenés una reserva real programada; "
+            f"no hago la prueba ese día para no pisarla. Probá /probar otro día (o /probar ahora)."
+        )
+        return
+    scheduler = app.bot_data["scheduler"]
+    scheduler.add_job(
+        run_probe_job,
+        DateTrigger(run_date=open_at - PROBE_LEAD, timezone=TZ),
+        args=[app, chat_id, open_at.isoformat()],
+        id=f"probe_{chat_id}",
+        replace_existing=True,
+        misfire_grace_time=30,
+    )
+    await update.message.reply_text(
+        f"🔎 Listo: el {open_at.strftime('%d/%m')} entro a las 07:58:30 y miro qué pasa con el "
+        f"{(open_at + timedelta(days=1)).strftime('%d/%m')} entre 07:59:50 y 08:01:30. "
+        f"No reservo nada; te mando lo que vi.\n"
+        f"(Si el bot se reinicia antes, se pierde: mandá /probar de nuevo.)"
+    )
+
+
 async def ayuda_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update):
         return
@@ -498,7 +575,9 @@ async def ayuda_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*/cancelar DD/MM* — cancela una reserva programada\n"
         "*/socios* — ver tus partners guardados\n"
         "*/socios agregar Nombre Apellido* — guardar un partner\n"
-        "*/socios borrar Nombre* — borrar un partner\n\n"
+        "*/socios borrar Nombre* — borrar un partner\n"
+        "*/probar* — mañana a las 08:00 miro cómo abre la reserva, sin reservar nada\n"
+        "*/probar ahora* — pruebo ya que el bot puede entrar, sin reservar nada\n\n"
         "Te aviso por acá después de cada intento, con una captura de pantalla.\n\n"
         "Cada persona tiene su propia cuenta de DeporYA y su propia programación — "
         "lo que vos configures no afecta a nadie más.",
@@ -611,6 +690,7 @@ def main():
     app.add_handler(CommandHandler("login", login_cmd))
     app.add_handler(CommandHandler("reservarfecha", reservarfecha_cmd))
     app.add_handler(CommandHandler("reservar", reservar_cmd))
+    app.add_handler(CommandHandler("probar", probar_cmd))
     app.add_handler(CallbackQueryHandler(reservar_button, pattern=r"^rv:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reservar_typed))
     app.add_handler(CommandHandler("status", status_cmd))

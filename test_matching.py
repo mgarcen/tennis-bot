@@ -129,6 +129,9 @@ class FakeSelect:
     async def select_option(self, value=None):
         self.page.current = self.page.by_value[value]
 
+    async def input_value(self):
+        return next((v for v, l in self.page.by_value.items() if l == self.page.current), "")
+
     async def click(self):
         self.page.clicks += 1
 
@@ -156,6 +159,9 @@ class FakePage:
 
     async def wait_for_load_state(self, _state=None):
         return None
+
+    async def wait_for_function(self, _script, arg=None, timeout=None, polling=None):
+        return None  # the fake grid updates instantly
 
     async def evaluate(self, _script):
         # Stands in for the grid-id diagnostic dump when no rows render.

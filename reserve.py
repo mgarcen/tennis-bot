@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
@@ -43,6 +44,42 @@ def row_courts(text):
     return [int(n) for n in re.findall(r"\b0*(\d{1,2})\b", without_times)]
 
 
+# Step screenshots cost ~0.5s each, which matters at 08:00. Only the final and failure
+# screenshots are taken unless SCREENSHOTS=all.
+ALL_SCREENSHOTS = os.environ.get("SCREENSHOTS", "").lower() == "all"
+
+
+async def debug_shot(page, name, screenshot_dir):
+    if ALL_SCREENSHOTS:
+        await screenshot(page, name, screenshot_dir)
+
+
+async def act_and_wait(page, action, max_wait):
+    """Run `action` (a coroutine function), then wait for the page to react to it.
+
+    This site updates in place over AJAX, where wait_for_load_state() returns at once,
+    so instead we wait until the visible text changes, then give it a moment to finish
+    rendering. `max_wait` (seconds) is the old fixed sleep: when nothing visibly changes,
+    we never wait longer than the bot used to.
+    """
+    try:
+        before = await page.evaluate("document.body ? document.body.innerText : ''")
+    except Exception:
+        before = None
+    await action()
+    try:
+        await page.wait_for_function(
+            "prev => document.body && document.body.innerText !== prev",
+            arg=before, timeout=max_wait * 1000, polling=100,
+        )
+    except PlaywrightTimeout:
+        return
+    except Exception:
+        # The action navigated away mid-wait; wait for the new page instead.
+        await page.wait_for_load_state("domcontentloaded")
+    await asyncio.sleep(0.25)
+
+
 async def screenshot(page, name, screenshot_dir):
     os.makedirs(screenshot_dir, exist_ok=True)
     path = f"{screenshot_dir}/{name}.png"
@@ -61,9 +98,10 @@ async def surface_options(page):
 
 
 async def select_surface(page, value):
-    await page.locator("#vTIPOCANCHAID").select_option(value=value)
-    await asyncio.sleep(3)
-    await page.wait_for_load_state("networkidle")
+    dropdown = page.locator("#vTIPOCANCHAID")
+    if await dropdown.input_value() == value:
+        return  # already showing; re-selecting would only wait for a refresh that never comes
+    await act_and_wait(page, lambda: dropdown.select_option(value=value), max_wait=5)
 
 
 async def goto_target_date(page, target_short, days_ahead):
@@ -74,9 +112,7 @@ async def goto_target_date(page, target_short, days_ahead):
     for click_num in range(max(days_ahead + 2, 5)):
         if target_short in await page.inner_text("body"):
             return click_num
-        await page.locator("#BTNBTNSIGUIENTE").click()
-        await asyncio.sleep(2)
-        await page.wait_for_load_state("networkidle")
+        await act_and_wait(page, lambda: page.locator("#BTNBTNSIGUIENTE").click(), max_wait=5)
     return None
 
 
@@ -180,6 +216,42 @@ async def find_court_across_surfaces(page, hour_tuple, court_num, options,
     return None, None, states, None
 
 
+async def open_schedule(page, username, password, lap=print):
+    """Log in and open 'Días disponibles', ready to pick a surface and date."""
+    # ── 1. LOGIN ──────────────────────────────────────────────────────
+    lap("1️⃣  Logging in …")
+    await page.goto(f"{BASE_URL}/login.aspx", wait_until="networkidle")
+    # Real keystrokes (the form validates on key/blur events), just without the
+    # human-speed delay between them.
+    await page.locator("#vUSERNAME").click()
+    await page.locator("#vUSERNAME").press_sequentially(username, delay=10)
+    await page.locator("#vUSERNAME").press("Tab")
+    await page.locator("#vUSERPASSWORD").click()
+    await page.locator("#vUSERPASSWORD").press_sequentially(password, delay=10)
+    await page.locator("#vUSERPASSWORD").press("Tab")
+    await asyncio.sleep(0.2)
+    try:
+        async with page.expect_navigation(timeout=20000):
+            await page.locator("#BTNENTER").click()
+    except PlaywrightTimeout:
+        pass
+    await page.wait_for_load_state("networkidle")
+    if "login" in page.url.lower():
+        raise RuntimeError("❌ Login failed")
+    print(f"   ✔ Logged in → {page.url}")
+
+    # ── 2. DÍAS DISPONIBLES ───────────────────────────────────────────
+    lap("2️⃣  Clicking Días disponibles …")
+    await act_and_wait(page, lambda: page.locator("#BTNBTNRESERVAR").click(), max_wait=5)
+    # Don't read the surface dropdown until it has options; reading it too early is
+    # one way to get "No encontré el selector de tipo de cancha".
+    try:
+        await page.locator("#vTIPOCANCHAID option").first.wait_for(state="attached", timeout=10000)
+    except PlaywrightTimeout:
+        pass
+    print(f"   ✔ → {page.url}")
+
+
 async def run_reservation(username, password, court="5", hour="10:00", days_ahead=1,
                            partner="Kevin Monzon", screenshot_dir="screenshots",
                            surface=None):
@@ -202,6 +274,10 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
     date_str = target.strftime("%d/%m/%Y")
     target_short = target.strftime("%d/%m/%y")
     print(f"🎾  Reserving Cancha {court_num} at {fmt_hour(hour_tuple)} on {date_str}")
+    t0 = time.monotonic()
+
+    def lap(msg):
+        print(f"[{time.monotonic() - t0:5.1f}s] {msg}")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -209,34 +285,7 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
         page = await context.new_page()
 
         try:
-            # ── 1. LOGIN ──────────────────────────────────────────────────────
-            print("1️⃣  Logging in …")
-            await page.goto(f"{BASE_URL}/login.aspx", wait_until="networkidle")
-            await page.locator("#vUSERNAME").click()
-            await page.locator("#vUSERNAME").type(username, delay=100)
-            await page.locator("#vUSERNAME").press("Tab")
-            await asyncio.sleep(0.5)
-            await page.locator("#vUSERPASSWORD").click()
-            await page.locator("#vUSERPASSWORD").type(password, delay=100)
-            await page.locator("#vUSERPASSWORD").press("Tab")
-            await asyncio.sleep(1)
-            try:
-                async with page.expect_navigation(timeout=20000):
-                    await page.locator("#BTNENTER").click()
-            except PlaywrightTimeout:
-                pass
-            await asyncio.sleep(2)
-            await page.wait_for_load_state("networkidle")
-            if "login" in page.url.lower():
-                raise RuntimeError("❌ Login failed")
-            print(f"   ✔ Logged in → {page.url}")
-
-            # ── 2. DÍAS DISPONIBLES ───────────────────────────────────────────
-            print("2️⃣  Clicking Días disponibles …")
-            await page.locator("#BTNBTNRESERVAR").click()
-            await asyncio.sleep(2)
-            await page.wait_for_load_state("networkidle")
-            print(f"   ✔ → {page.url}")
+            await open_schedule(page, username, password, lap)
 
             # ── 3. FIND THE COURT, WHICHEVER SURFACE IT'S ON ──────────────────
             options = await surface_options(page)
@@ -249,7 +298,7 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
                 if not options:
                     raise RuntimeError(f"❌ No existe la superficie '{surface}'")
 
-            print(f"3️⃣  Looking for Cancha {court_num} across {len(options)} surface(s): "
+            lap(f"3️⃣  Looking for Cancha {court_num} across {len(options)} surface(s): "
                   f"{', '.join(label for _, label in options)}")
             row, found_on, states, booked_court = await find_court_across_surfaces(
                 page, hour_tuple, court_num, options, target_short, days_ahead
@@ -279,37 +328,56 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
             substituted = booked_court != court_num
             print(f"   ✔ Booking Cancha {booked_court} on {found_on}"
                   + (f" (instead of Cancha {court_num})" if substituted else ""))
-            await screenshot(page, "03_schedule", screenshot_dir)
+            await debug_shot(page, "03_schedule", screenshot_dir)
 
             # ── 4. CLICK RESERVAR ON THAT ROW ─────────────────────────────────
-            print(f"4️⃣  Reserving Cancha {booked_court} ({found_on}) at {fmt_hour(hour_tuple)} …")
-            await row.locator("input[type=button], button, a").first.click(timeout=5000)
-            await asyncio.sleep(2)
-            await page.wait_for_load_state("networkidle")
-            await screenshot(page, "04_after_row_click", screenshot_dir)
+            lap(f"4️⃣  Reserving Cancha {booked_court} ({found_on}) at {fmt_hour(hour_tuple)} …")
+            await act_and_wait(
+                page, lambda: row.locator("input[type=button], button, a").first.click(timeout=5000),
+                max_wait=5,
+            )
+            await debug_shot(page, "04_after_row_click", screenshot_dir)
 
             # ── 5. CLICK BTNBOTONBUSCAR (navigates to horaactual / opens modal) ─
-            print("5️⃣  Clicking BTNBOTONBUSCAR …")
+            lap("5️⃣  Clicking BTNBOTONBUSCAR …")
             await page.locator("#BTNBOTONBUSCAR").wait_for(state="visible", timeout=10000)
-            await asyncio.sleep(1)
 
-            popup_page = None
-            try:
-                async with context.expect_page(timeout=5000) as popup_info:
-                    await page.locator("#BTNBOTONBUSCAR").click()
-                popup_page = await popup_info.value
+            # Buscar can open a popup, navigate this page, or reveal the search box in place.
+            # Watch for all three at once and move on at the first one, instead of waiting
+            # out a popup timeout first (that alone used to cost 5-8s).
+            popups = []
+
+            def on_popup(new_page):
+                popups.append(new_page)
+
+            context.on("page", on_popup)
+            url_before = page.url
+            await page.locator("#BTNBOTONBUSCAR").click()
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                if popups or page.url != url_before:
+                    break
+                if await page.locator("#vTEXTOBUSCAR").count() > 0:
+                    break
+                if any([await f.locator("#vTEXTOBUSCAR").count() > 0 for f in page.frames[1:]]):
+                    break
+                await asyncio.sleep(0.1)
+            context.remove_listener("page", on_popup)
+
+            popup_page = popups[0] if popups else None
+            if popup_page:
                 await popup_page.wait_for_load_state("networkidle")
                 print(f"   ✔ Popup opened: {popup_page.url}")
-            except PlaywrightTimeout:
-                await asyncio.sleep(3)
-                await page.wait_for_load_state("networkidle")
+            else:
+                if page.url != url_before:
+                    await page.wait_for_load_state("networkidle")
                 print(f"   ✔ No popup, current URL: {page.url}")
 
             working_page = popup_page if popup_page else page
-            await screenshot(working_page, "05_reserva_page", screenshot_dir)
+            await debug_shot(working_page, "05_reserva_page", screenshot_dir)
 
             # ── 6. SEARCH FOR PARTNER ─────────────────────────────────────────
-            print(f"6️⃣  Searching for {partner} …")
+            lap(f"6️⃣  Searching for {partner} …")
 
             target_frame = None
             search_pages = [working_page] + ([page] if popup_page else [])
@@ -352,17 +420,16 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
                     except Exception:
                         continue
 
-            await screenshot(working_page, "06_before_type", screenshot_dir)
+            await debug_shot(working_page, "06_before_type", screenshot_dir)
 
             if target_frame:
                 await target_frame.evaluate("document.getElementById('vTEXTOBUSCAR').focus()")
-            await working_page.keyboard.type(partner.split()[0], delay=100)
+            await working_page.keyboard.type(partner.split()[0], delay=30)
             print(f"   ✔ Typed '{partner.split()[0]}'")
-            await asyncio.sleep(2)
-            await screenshot(working_page, "07_autocomplete", screenshot_dir)
+            await debug_shot(working_page, "07_autocomplete", screenshot_dir)
 
             # ── 7. SELECT PARTNER ──────────────────────────────────────────────
-            print(f"7️⃣  Selecting {partner} …")
+            lap(f"7️⃣  Selecting {partner} …")
             partner_upper = partner.upper()
             partner_frame = target_frame if target_frame else working_page.main_frame
 
@@ -370,24 +437,23 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
                 f"[id*='SOCIOFULLNOMBREAPELLIDO']:has-text('{partner_upper}') a"
             ).first
             await partner_el.wait_for(timeout=8000)
-            await partner_el.click()
+            # The selection posts back before Confirmar will accept it; wait for that.
+            await act_and_wait(working_page, partner_el.click, max_wait=1)
             print(f"   ✔ Selected {partner}")
-            await asyncio.sleep(1)
-            await screenshot(working_page, "08_partner_selected", screenshot_dir)
+            await debug_shot(working_page, "08_partner_selected", screenshot_dir)
 
             # ── 8. CONFIRM ────────────────────────────────────────────────────
-            print("8️⃣  Confirming …")
+            lap("8️⃣  Confirming …")
             confirm_page = popup_page if popup_page else page
             confirmar = confirm_page.locator("button:has-text('Confirmar'), input[value='Confirmar']").first
             await confirmar.wait_for(timeout=8000)
             await confirmar.click()
             print("   ✔ Clicked Confirmar")
-            await asyncio.sleep(2)
 
             si_btn = confirm_page.locator("#DVELOP_CONFIRMPANEL_ENTERContainer_SaveButton")
             await si_btn.wait_for(timeout=8000)
             await si_btn.click()
-            print("   ✔ Clicked Sí (#DVELOP_CONFIRMPANEL_ENTERContainer_SaveButton)")
+            lap("   ✔ Clicked Sí — booking submitted")
             await asyncio.sleep(2)
             try:
                 await page.wait_for_load_state("networkidle", timeout=10000)
@@ -398,7 +464,7 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
             message = f"Cancha {booked_court} ({found_on}) el {date_str} a las {fmt_hour(hour_tuple)} con {partner}"
             if substituted:
                 message += f" — la Cancha {court_num} estaba ocupada, reservé la {booked_court}"
-            print(f"\n✅  Done! {message}")
+            lap(f"✅  Done! {message}")
             return {"success": True, "message": message, "screenshot": final_shot}
 
         except Exception as e:
@@ -413,6 +479,140 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
             short_message = str(e).strip().split("\n")[0][:300]
             return {"success": False, "message": short_message, "screenshot": error_shot}
 
+        finally:
+            await browser.close()
+
+
+# ── Probe: watch the 08:00 opening without booking anything ──────────────────────
+
+GRID_STATE_JS = """sel => {
+    const rows = [...document.querySelectorAll(sel)];
+    const visible = el => !!el && el.offsetParent !== null;
+    const bookable = rows.filter(r => visible(r.querySelector('input[type=button], button, a')));
+    return {
+        rows: rows.length,
+        bookable: bookable.length,
+        sample: rows.slice(0, 2).map(r => r.innerText.replace(/\\s+/g, ' ').trim().slice(0, 60)),
+    };
+}"""
+
+
+async def grid_state(page, target_short):
+    """What the page shows right now: is the target date there, and how bookable is it."""
+    body = await page.inner_text("body")
+    state = await page.evaluate(GRID_STATE_JS, ROW_SELECTOR)
+    state["date"] = target_short in body
+    return state
+
+
+def fmt_state(st):
+    return (f"fecha {'✔' if st['date'] else '✘'} · filas {st['rows']} · "
+            f"botones Reservar {st['bookable']}")
+
+
+async def sleep_until(when):
+    delay = (when - datetime.now(TZ)).total_seconds()
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
+async def run_probe(username, password, open_at=None, screenshot_dir="screenshots/probe"):
+    """Log in and watch the grid around `open_at` (the 08:00 opening). Never books.
+
+    With open_at=None it just times login + navigation and reports one snapshot, as a
+    quick check that the bot can still get through the site.
+
+    Returns {"success": bool, "lines": [str], "screenshots": [path]}.
+    """
+    lines, shots = [], []
+    t0 = time.monotonic()
+
+    def log(msg):
+        stamp = datetime.now(TZ).strftime("%H:%M:%S.%f")[:-4]
+        line = f"{stamp} {msg}"
+        print(line)
+        lines.append(line)
+
+    def lap(msg):
+        print(f"[{time.monotonic() - t0:5.1f}s] {msg}")
+
+    base = open_at or datetime.now(TZ)
+    target_short = (base + timedelta(days=1)).strftime("%d/%m/%y")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(viewport={"width": 1280, "height": 900}, locale="es-UY")
+        page = await context.new_page()
+        try:
+            await open_schedule(page, username, password, lap)
+            schedule_url = page.url
+            log(f"login + Días disponibles: {time.monotonic() - t0:.1f}s")
+            options = await surface_options(page)
+            log(f"superficies: {', '.join(l for _, l in options) or 'ninguna'}")
+
+            async def refresh():
+                """Reload and go back to the target date; returns seconds it took."""
+                t = time.monotonic()
+                await page.goto(schedule_url, wait_until="domcontentloaded")
+                await page.locator(f"{ROW_SELECTOR}, #BTNBTNRESERVAR").first.wait_for(timeout=10000)
+                if await page.locator(ROW_SELECTOR).count() == 0:
+                    # The URL alone doesn't bring the grid back; go in through the button.
+                    await act_and_wait(page, lambda: page.locator("#BTNBTNRESERVAR").click(), max_wait=5)
+                    await page.locator(ROW_SELECTOR).first.wait_for(timeout=10000)
+                await goto_target_date(page, target_short, 1)
+                return time.monotonic() - t
+
+            t = time.monotonic()
+            clicks = await goto_target_date(page, target_short, 1)
+            log(f"ir a {target_short}: {'no aparece' if clicks is None else f'{clicks} clic(s)'} "
+                f"en {time.monotonic() - t:.1f}s")
+            st = await grid_state(page, target_short)
+            log(f"ahora: {fmt_state(st)} · {' | '.join(st['sample'])}")
+            shots.append(await screenshot(page, "probe_1_inicio", screenshot_dir))
+
+            if open_at is None:
+                try:
+                    lap_t = await refresh()
+                    log(f"recargar y volver a la fecha: {lap_t:.1f}s")
+                except Exception as e:
+                    log(f"recargar falló: {str(e).splitlines()[0][:120]}")
+                return {"success": True, "lines": lines, "screenshots": shots}
+
+            # Around the opening: compare what the page shows by itself with a fresh load.
+            await sleep_until(open_at - timedelta(seconds=10))
+            log("— mirando la apertura —")
+            last, changed_shot = None, False
+            end = open_at + timedelta(seconds=90)
+            while datetime.now(TZ) < end:
+                passive = await grid_state(page, target_short)
+                try:
+                    took = await refresh()
+                    fresh = await grid_state(page, target_short)
+                    summary = f"sin recargar: {fmt_state(passive)} || recargando ({took:.1f}s): {fmt_state(fresh)}"
+                except Exception as e:
+                    fresh = None
+                    summary = f"sin recargar: {fmt_state(passive)} || recarga falló: {str(e).splitlines()[0][:80]}"
+                key = (passive["date"], passive["bookable"], fresh and fresh["date"], fresh and fresh["bookable"])
+                past_open = datetime.now(TZ) >= open_at
+                # Log every change, plus a heartbeat every tick in the 20s around 08:00.
+                near = abs((datetime.now(TZ) - open_at).total_seconds()) <= 10
+                if key != last or near:
+                    log(summary)
+                if key != last and last is not None and not changed_shot:
+                    shots.append(await screenshot(page, "probe_2_cambio", screenshot_dir))
+                    changed_shot = True
+                last = key
+                await asyncio.sleep(0.5 if near else (5 if past_open else 1))
+            shots.append(await screenshot(page, "probe_3_final", screenshot_dir))
+            log("— fin —")
+            return {"success": True, "lines": lines, "screenshots": shots}
+        except Exception as e:
+            log(f"❌ {str(e).strip().splitlines()[0][:200]}")
+            try:
+                shots.append(await screenshot(page, "probe_ERROR", screenshot_dir))
+            except Exception:
+                pass
+            return {"success": False, "lines": lines, "screenshots": shots}
         finally:
             await browser.close()
 
