@@ -245,13 +245,20 @@ async def open_schedule(page, username, password, lap=print):
 
     # ── 2. DÍAS DISPONIBLES ───────────────────────────────────────────
     lap("2️⃣  Clicking Días disponibles …")
-    await act_and_wait(page, lambda: page.locator("#BTNBTNRESERVAR").click(), max_wait=5)
-    # Don't read the surface dropdown until it has options; reading it too early is
-    # one way to get "No encontré el selector de tipo de cancha".
-    try:
-        await page.locator("#vTIPOCANCHAID option").first.wait_for(state="attached", timeout=10000)
-    except PlaywrightTimeout:
-        pass
+    # At 08:00 the site is overloaded and this click can silently do nothing (seen
+    # 2026-11-11: still on inicio.aspx after the wait → "No encontré el selector de
+    # tipo de cancha"). So check the schedule page really opened, and click again if not.
+    surfaces = page.locator("#vTIPOCANCHAID option").first
+    for attempt in range(1, 4):
+        try:
+            if "inicio.aspx" in page.url.lower():
+                await act_and_wait(page, lambda: page.locator("#BTNBTNRESERVAR").click(timeout=10000),
+                                   max_wait=5)
+            # Don't read the surface dropdown until it has options.
+            await surfaces.wait_for(state="attached", timeout=15000)
+            break
+        except PlaywrightTimeout:
+            print(f"   … schedule not open after try {attempt} ({page.url})")
     print(f"   ✔ → {page.url}")
 
 
