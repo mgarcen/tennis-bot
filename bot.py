@@ -585,6 +585,11 @@ async def ayuda_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# How long before 08:00 the booking job logs in. At 08:00 itself the site is overloaded
+# (2026-11-11: login took 33s and the next click was lost), so get that done first.
+PREWARM_LEAD = timedelta(seconds=int(os.environ.get("PREWARM_SECONDS", "180")))
+
+
 def pending_job_id(chat_id: int, date_key: str) -> str:
     return f"oneoff_{chat_id}_{date_key.replace('/', '-')}"
 
@@ -593,7 +598,8 @@ def schedule_pending_job(app: Application, chat_id: int, entry: dict):
     scheduler = app.bot_data.get("scheduler")
     if scheduler is None:
         return
-    run_at = datetime.fromisoformat(entry["run_at"])
+    # Start early: log in and find the court before 08:00 (see run_reservation's open_at).
+    run_at = datetime.fromisoformat(entry["run_at"]) - PREWARM_LEAD
     now = datetime.now(TZ)
     if run_at < now:
         run_at = now + timedelta(seconds=5)
@@ -635,6 +641,7 @@ async def run_pending_reservation(app: Application, chat_id: int, entry: dict):
             log.exception("Could not notify chat %s", chat_id)
         return
 
+    open_at = datetime.fromisoformat(entry["run_at"])
     log.info("Running one-off reservation for chat %s: %s", chat_id, entry["date"])
     try:
         result = await run_reservation(
@@ -645,6 +652,7 @@ async def run_pending_reservation(app: Application, chat_id: int, entry: dict):
             days_ahead=days_ahead,
             partner=entry["partner"],
             screenshot_dir=f"screenshots/{chat_id}",
+            open_at=open_at if open_at > datetime.now(TZ) else None,
         )
     except Exception as e:
         log.exception("One-off reservation crashed for chat %s", chat_id)

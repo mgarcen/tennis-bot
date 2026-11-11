@@ -262,10 +262,78 @@ async def open_schedule(page, username, password, lap=print):
     print(f"   ✔ → {page.url}")
 
 
+# Pre-warm: how long after the opening to keep reloading for the court to appear.
+OPEN_WINDOW = timedelta(seconds=90)
+# Start reloading this long before the opening, in case the site's clock runs ahead.
+OPEN_EARLY = timedelta(seconds=2)
+
+
+async def reload_schedule(page, schedule_url):
+    """Fresh copy of the schedule page (the grid, not just the URL)."""
+    await page.goto(schedule_url, wait_until="domcontentloaded")
+    await page.locator(f"{ROW_SELECTOR}, #BTNBTNRESERVAR, #vTIPOCANCHAID").first.wait_for(timeout=15000)
+    if await page.locator("#vTIPOCANCHAID option").count() == 0:
+        # The URL alone didn't bring the schedule back; go in through the button.
+        await act_and_wait(page, lambda: page.locator("#BTNBTNRESERVAR").click(timeout=10000), max_wait=5)
+        await page.locator("#vTIPOCANCHAID option").first.wait_for(state="attached", timeout=15000)
+
+
+async def wait_for_opening(page, hour_tuple, court_num, options, target_short, days_ahead,
+                           open_at, first, lap):
+    """Logged in before `open_at`: reload until the court is bookable, then return it.
+
+    `first` is the find_court_across_surfaces() result from before the opening. Before
+    08:00 a hidden Reserva link only means "not open yet", so that answer is used just to
+    learn which surface the court is on; after that only that surface is reloaded.
+    """
+    row, found_on, states, booked_court = first
+    if row is not None and booked_court == court_num:
+        lap(f"   ✔ Cancha {court_num} is already bookable — not waiting for {open_at:%H:%M}")
+        return first
+    home = [(v, l) for v, l in options if l == found_on] or options
+    schedule_url = page.url
+    lap(f"⏳  Pre-warmed; waiting for {open_at:%H:%M:%S} "
+        f"(watching {', '.join(l for _, l in home)})")
+    await sleep_until(open_at - OPEN_EARLY)
+
+    deadline = open_at + OPEN_WINDOW
+    tries = 0
+    while True:
+        tries += 1
+        try:
+            await reload_schedule(page, schedule_url)
+            result = await find_court_across_surfaces(
+                page, hour_tuple, court_num, home, target_short, days_ahead
+            )
+        except Exception as e:
+            print(f"      reload {tries} failed: {str(e).splitlines()[0][:120]}")
+            result = None
+        now = datetime.now(TZ)
+        if result is not None:
+            row, found_on, states, booked_court = result
+            # Before the opening, only the requested court counts: other courts showing
+            # free then would just be the grid not having opened yet for everyone.
+            if row is not None and (booked_court == court_num or now >= open_at):
+                lap(f"   ✔ Open after {tries} reload(s), {(now - open_at).total_seconds():+.1f}s "
+                    f"from {open_at:%H:%M:%S}")
+                return result
+        if now >= deadline:
+            lap(f"   ✘ Still not bookable {OPEN_WINDOW.seconds}s after {open_at:%H:%M} "
+                f"({tries} reloads)")
+            if result is None:
+                raise RuntimeError(f"❌ La página no cargó después de las {open_at:%H:%M}")
+            return result
+
+
 async def run_reservation(username, password, court="5", hour="10:00", days_ahead=1,
                            partner="Kevin Monzon", screenshot_dir="screenshots",
-                           surface=None):
+                           surface=None, open_at=None):
     """Run the full DeporYA reservation flow.
+
+    With `open_at` (the 08:00 opening, still in the future) it pre-warms: logs in and
+    finds the court's surface right away, then from just before `open_at` reloads that
+    surface until the court becomes bookable, so the slow login is out of the way when
+    the rush starts.
 
     Court numbers are unique across the club, so `court` alone identifies a court and
     the surface it sits on is discovered by searching each one. Pass `surface` (a
@@ -313,6 +381,11 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
             row, found_on, states, booked_court = await find_court_across_surfaces(
                 page, hour_tuple, court_num, options, target_short, days_ahead
             )
+            if open_at is not None and datetime.now(TZ) < open_at + OPEN_WINDOW:
+                row, found_on, states, booked_court = await wait_for_opening(
+                    page, hour_tuple, court_num, options, target_short, days_ahead,
+                    open_at, (row, found_on, states, booked_court), lap,
+                )
 
             if row is None:
                 await screenshot(page, "03_FAIL_no_row", screenshot_dir)
