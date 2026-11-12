@@ -21,6 +21,7 @@ from telegram.ext import (
     filters,
 )
 
+from deporya import run_direct_probe
 from reserve import har_path, run_probe, run_reservation
 
 logging.basicConfig(
@@ -528,11 +529,29 @@ async def run_probe_job(app: Application, chat_id: int, open_at_iso: str | None)
     await send_traffic(app, chat_id, probe_dir)
 
 
-async def run_rehearsal_job(app: Application, chat_id: int, partner: str):
+async def run_direct_probe_job(app: Application, chat_id: int, court: str | None, hour: str | None):
+    u = get_user(chat_id)
+    log.info("Running browser-free probe for chat %s", chat_id)
+    try:
+        result = await run_direct_probe(u["tennis_user"], u["tennis_pass"], TZ, court=court, hour=hour)
+    except Exception as e:
+        log.exception("Direct probe crashed for chat %s", chat_id)
+        result = {"success": False, "lines": [f"❌ {e}"], "screenshots": []}
+    try:
+        await send_probe_report(app, chat_id, "⚡ Prueba sin navegador (no reservé nada)", result)
+    except Exception:
+        log.exception("Could not send direct probe report to chat %s", chat_id)
+
+
+REHEARSAL_DAYS = {"hoy": 0, "mañana": 1, "manana": 1, "pasado": 2}
+
+
+async def run_rehearsal_job(app: Application, chat_id: int, partner: str, days_ahead: int = 1):
     u = get_user(chat_id)
     shot_dir = f"screenshots/{chat_id}/ensayo"
     try:
         result = await run_reservation(u["tennis_user"], u["tennis_pass"], partner=partner,
+                                       days_ahead=days_ahead,
                                        screenshot_dir=shot_dir, rehearsal=True)
     except Exception as e:
         log.exception("Rehearsal crashed for chat %s", chat_id)
@@ -564,15 +583,32 @@ async def probar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         app.create_task(run_probe_job(app, chat_id, None))
         return
 
+    if context.args and context.args[0].lower() == "directo":
+        # Optional: /probar directo 19:00 5 → also say how that court looks tomorrow.
+        hour = court = None
+        if len(context.args) >= 3 and not validate_hour_court(context.args[1], context.args[2]):
+            hour, court = context.args[1].zfill(5), context.args[2]
+        await update.message.reply_text("⚡ Pruebo entrar y leer el día de mañana sin navegador. No reservo nada.")
+        app.create_task(run_direct_probe_job(app, chat_id, court, hour))
+        return
+
     if context.args and context.args[0].lower() == "ensayo":
-        partner = " ".join(context.args[1:]) or (u["partners"][-1] if u["partners"] else "")
+        rest = context.args[1:]
+        # The site allows one booking per day, and refuses the rehearsal on a day that
+        # already has one: /probar ensayo hoy (or pasado) rehearses on another day.
+        days_ahead, day_word = 1, "mañana"
+        if rest and rest[0].lower() in REHEARSAL_DAYS:
+            day_word = rest[0].lower()
+            days_ahead, rest = REHEARSAL_DAYS[day_word], rest[1:]
+        partner = " ".join(rest) or (u["partners"][-1] if u["partners"] else "")
         if not partner:
-            await update.message.reply_text("Decime con quién: /probar ensayo Nombre Apellido")
+            await update.message.reply_text("Decime con quién: /probar ensayo [hoy|mañana|pasado] Nombre Apellido")
             return
         await update.message.reply_text(
-            f"🎭 Ensayo: recorro las pantallas de reserva para mañana con {partner} y freno "
-            f"antes de Confirmar. No reservo nada.")
-        app.create_task(run_rehearsal_job(app, chat_id, partner))
+            f"🎭 Ensayo: recorro las pantallas de reserva para {day_word} con {partner} y freno "
+            f"antes de Confirmar. No reservo nada.\n"
+            f"(Si ese día ya tenés una reserva, el sitio no deja: usá /probar ensayo hoy {partner}.)")
+        app.create_task(run_rehearsal_job(app, chat_id, partner, days_ahead))
         return
 
     now = datetime.now(TZ)
@@ -626,7 +662,8 @@ async def ayuda_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*/socios agregar Nombre Apellido* — guardar un partner\n"
         "*/socios borrar Nombre* — borrar un partner\n"
         "*/probar* — mañana a las 08:00 miro cómo abre la reserva, sin reservar nada\n"
-        "*/probar ahora* — pruebo ya que el bot puede entrar, sin reservar nada\n\n"
+        "*/probar ahora* — pruebo ya que el bot puede entrar, sin reservar nada\n"
+        "*/probar directo* — lo mismo pero sin navegador (el modo rápido nuevo)\n\n"
         "Te aviso por acá después de cada intento, con una captura de pantalla.\n\n"
         "Cada persona tiene su propia cuenta de DeporYA y su propia programación — "
         "lo que vos configures no afecta a nadie más.",

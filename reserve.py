@@ -137,6 +137,19 @@ async def screenshot(page, name, screenshot_dir):
     return path
 
 
+async def site_notice(page):
+    """The notice the site is showing (its pop-up message), or None."""
+    try:
+        texts = await page.locator(".ui-pnotify-text").all_inner_texts()
+        texts = [" ".join(t.split()) for t in texts if t.strip()]
+        if texts:
+            return texts[-1][:200]
+        m = re.search(r"Ya tienes el máximo[^\n]*", await page.inner_text("body"))
+        return m.group(0)[:200] if m else None
+    except Exception:
+        return None
+
+
 async def surface_options(page):
     """[(value, label)] of the surface dropdown, in the order the page lists them."""
     return await page.evaluate("""() =>
@@ -539,7 +552,15 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
 
             # ── 5. CLICK BTNBOTONBUSCAR (navigates to horaactual / opens modal) ─
             lap("5️⃣  Clicking BTNBOTONBUSCAR …")
-            await page.locator("#BTNBOTONBUSCAR").wait_for(state="visible", timeout=10000)
+            try:
+                await page.locator("#BTNBOTONBUSCAR").wait_for(state="visible", timeout=10000)
+            except PlaywrightTimeout:
+                # The site can refuse the slot with a notice instead of opening the booking
+                # screen (seen 2026-11-12: "Ya tienes el máximo de reservas de cancha …").
+                notice = await site_notice(page)
+                if notice:
+                    raise RuntimeError(f"❌ DeporYA no dejó reservar: {notice}") from None
+                raise
 
             # Buscar can open a popup, navigate this page, or reveal the search box in place.
             # Watch for all three at once and move on at the first one, instead of waiting

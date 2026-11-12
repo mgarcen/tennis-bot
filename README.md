@@ -75,6 +75,8 @@ DeporYA login.
 - `/login usuario contraseña` — save your own DeporYA credentials (required once, before `/reservarfecha`).
 - `/reservar` — book by tapping buttons: day (next 7 days), hour, court, partner (from your saved list), then confirm. Each step has ‹ Atrás / ✖ Cancelar, and "✏️ Otra/Otro" lets you type an hour, court or partner the buttons don't list. A partner typed there is saved for next time.
 - `/probar` — at the next 08:00 opening, log in at 07:58:30 and watch tomorrow's grid until 08:01:30, reporting a timeline (date visible? rows? Reservar buttons?) with and without reloading. Never books. Refuses on a morning that already has a real booking, since a second login could disturb it. `/probar ahora` just times login + navigation once.
+- `/probar directo [HH:MM cancha]` — the same check without a browser: logs in and reads tomorrow's schedule by sending the site's own requests (`deporya.py`), and reports how long each step took. Never books. This is the fast path the 08:00 booking will move to.
+- `/probar ensayo [hoy|mañana|pasado] Nombre Apellido` — walks the booking screens in the browser and stops before Confirmar. The site allows one booking per day, so rehearse on a day you have nothing booked.
 - `/reservarfecha DD/MM HH:MM cancha partner` — e.g. `/reservarfecha 15/09 19:00 5 Kevin Monzon`. One-time booking for a specific future date; fires automatically at 08:00 the morning it opens. `cancha` is just the court number, ladrillo or cemento.
 - `/status` — lists your pending scheduled bookings.
 - `/cancelar DD/MM` — cancels the pending booking for that date.
