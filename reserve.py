@@ -146,11 +146,54 @@ async def surface_options(page):
     """)
 
 
+def _is_grid_refresh(response):
+    request = response.request
+    return (request.method == "POST" and "horasdeundia.aspx" in response.url
+            and '"REFRESH"' in (request.post_data or ""))
+
+
+async def act_and_wait_grid(page, action, timeout=12):
+    """Run `action`, then wait until the schedule has received its new grid.
+
+    Changing day is two requests: one that only updates the date label, then a REFRESH
+    that brings the rows. Reading the grid after the first one (as act_and_wait does)
+    reads the PREVIOUS day: on 2026-11-12 the bot spent 08:00 watching that day's grid
+    instead of the 13th's. Returns False if no refresh was seen.
+    """
+    try:
+        async with page.expect_response(_is_grid_refresh, timeout=timeout * 1000) as info:
+            await action()
+        await (await info.value).finished()
+    except PlaywrightTimeout:
+        print("      … no grid refresh seen")
+        return False
+    await asyncio.sleep(0.3)  # let the rows render
+    return True
+
+
+GRID_DATE_JS = """() => {
+    try {
+        let sdt = gx.fn.getHidden('vSDTHORASDELDIA');
+        if (typeof sdt === 'string') sdt = JSON.parse(sdt);
+        return (sdt && sdt.Fecha) || null;
+    } catch (e) { return null; }
+}"""
+
+
+async def grid_date(page):
+    """The day the grid's data is for, as dd/mm/yy (None if the page won't say)."""
+    try:
+        iso = await page.evaluate(GRID_DATE_JS)
+        return datetime.strptime(iso[:10], "%Y-%m-%d").strftime("%d/%m/%y") if iso else None
+    except Exception:
+        return None
+
+
 async def select_surface(page, value):
     dropdown = page.locator("#vTIPOCANCHAID")
     if await dropdown.input_value() == value:
         return  # already showing; re-selecting would only wait for a refresh that never comes
-    await act_and_wait(page, lambda: dropdown.select_option(value=value), max_wait=5)
+    await act_and_wait_grid(page, lambda: dropdown.select_option(value=value), timeout=6)
 
 
 async def goto_target_date(page, target_short, days_ahead):
@@ -158,11 +201,24 @@ async def goto_target_date(page, target_short, days_ahead):
 
     Returns the number of clicks it took, or None if the date never appeared.
     """
+    clicks = None
     for click_num in range(max(days_ahead + 2, 5)):
         if target_short in await page.inner_text("body"):
-            return click_num
-        await act_and_wait(page, lambda: page.locator("#BTNBTNSIGUIENTE").click(), max_wait=5)
-    return None
+            clicks = click_num
+            break
+        await act_and_wait_grid(page, lambda: page.locator("#BTNBTNSIGUIENTE").click())
+    if clicks is None:
+        return None
+    # The label can say the target day while the rows are still the old day's.
+    for _ in range(25):
+        shown = await grid_date(page)
+        if shown in (None, target_short):
+            break
+        await asyncio.sleep(0.2)
+    print(f"      grid data is for {shown or '? (page did not say)'}")
+    if shown not in (None, target_short):
+        return None
+    return clicks
 
 
 async def scan_surface(page, hour_tuple, court_num):
@@ -376,13 +432,16 @@ async def wait_for_opening(page, hour_tuple, court_num, options, target_short, d
 
 async def run_reservation(username, password, court="5", hour="10:00", days_ahead=1,
                            partner="Kevin Monzon", screenshot_dir="screenshots",
-                           surface=None, open_at=None):
+                           surface=None, open_at=None, rehearsal=False):
     """Run the full DeporYA reservation flow.
 
     With `open_at` (the 08:00 opening, still in the future) it pre-warms: logs in and
     finds the court's surface right away, then from just before `open_at` reloads that
     surface until the court becomes bookable, so the slow login is out of the way when
     the rush starts.
+
+    With `rehearsal` it walks the booking screens for the first free slot that day and
+    stops before Confirmar, so nothing is booked (used to record the site's traffic).
 
     Court numbers are unique across the club, so `court` alone identifies a court and
     the surface it sits on is discovered by searching each one. Pass `surface` (a
@@ -435,6 +494,14 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
                     page, hour_tuple, court_num, options, target_short, days_ahead,
                     open_at, (row, found_on, states, booked_court), lap,
                 )
+
+            if rehearsal:
+                free = page.locator(ROW_SELECTOR).filter(
+                    has=page.locator("input[type=button]:visible, button:visible, a:visible"))
+                if await free.count() == 0:
+                    raise RuntimeError(f"❌ No hay ningún horario libre el {date_str} para ensayar")
+                row, found_on, booked_court = free.first, "ensayo", court_num
+                print(f"   🎭 Rehearsal on: {' '.join((await row.inner_text()).split())[:80]}")
 
             if row is None:
                 await screenshot(page, "03_FAIL_no_row", screenshot_dir)
@@ -573,6 +640,12 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
             await act_and_wait(working_page, partner_el.click, max_wait=1)
             print(f"   ✔ Selected {partner}")
             await debug_shot(working_page, "08_partner_selected", screenshot_dir)
+
+            if rehearsal:
+                shot = await screenshot(working_page, "08_rehearsal_stop", screenshot_dir)
+                lap("🎭  Rehearsal: stopped before Confirmar — nothing booked")
+                return {"success": True, "message": "Ensayo completo: llegué hasta Confirmar y "
+                        "frené ahí. No reservé nada.", "screenshot": shot}
 
             # ── 8. CONFIRM ────────────────────────────────────────────────────
             lap("8️⃣  Confirming …")

@@ -528,6 +528,27 @@ async def run_probe_job(app: Application, chat_id: int, open_at_iso: str | None)
     await send_traffic(app, chat_id, probe_dir)
 
 
+async def run_rehearsal_job(app: Application, chat_id: int, partner: str):
+    u = get_user(chat_id)
+    shot_dir = f"screenshots/{chat_id}/ensayo"
+    try:
+        result = await run_reservation(u["tennis_user"], u["tennis_pass"], partner=partner,
+                                       screenshot_dir=shot_dir, rehearsal=True)
+    except Exception as e:
+        log.exception("Rehearsal crashed for chat %s", chat_id)
+        result = {"success": False, "message": str(e), "screenshot": None}
+    try:
+        await app.bot.send_message(chat_id=chat_id, text=("🎭 " if result["success"] else "❌ Ensayo: ")
+                                   + result["message"])
+        shot = result.get("screenshot")
+        if shot and os.path.exists(shot):
+            with open(shot, "rb") as f:
+                await app.bot.send_photo(chat_id=chat_id, photo=f)
+    except Exception:
+        log.exception("Could not notify chat %s", chat_id)
+    await send_traffic(app, chat_id, shot_dir)
+
+
 async def probar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _authorized(update):
         return
@@ -541,6 +562,17 @@ async def probar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and context.args[0].lower() == "ahora":
         await update.message.reply_text("🔎 Probando ahora: entro, abro el día de mañana y te cuento cuánto tardó. No reservo nada.")
         app.create_task(run_probe_job(app, chat_id, None))
+        return
+
+    if context.args and context.args[0].lower() == "ensayo":
+        partner = " ".join(context.args[1:]) or (u["partners"][-1] if u["partners"] else "")
+        if not partner:
+            await update.message.reply_text("Decime con quién: /probar ensayo Nombre Apellido")
+            return
+        await update.message.reply_text(
+            f"🎭 Ensayo: recorro las pantallas de reserva para mañana con {partner} y freno "
+            f"antes de Confirmar. No reservo nada.")
+        app.create_task(run_rehearsal_job(app, chat_id, partner))
         return
 
     now = datetime.now(TZ)

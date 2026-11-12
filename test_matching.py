@@ -136,6 +136,23 @@ class FakeSelect:
         self.page.clicks += 1
 
 
+class FakeResponseWait:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    @property
+    def value(self):
+        async def get():
+            return self
+        return get()
+
+    async def finished(self):
+        return None
+
+
 class FakePage:
     """A grid showing `surfaces[label]` rows, reachable at `target_short`."""
 
@@ -162,6 +179,9 @@ class FakePage:
 
     async def wait_for_function(self, _script, arg=None, timeout=None, polling=None):
         return None  # the fake grid updates instantly
+
+    def expect_response(self, _predicate, timeout=None):
+        return FakeResponseWait()  # the fake grid's refresh arrives instantly
 
     async def evaluate(self, _script):
         # Stands in for the grid-id diagnostic dump when no rows render.
