@@ -21,7 +21,7 @@ from telegram.ext import (
     filters,
 )
 
-from reserve import run_probe, run_reservation
+from reserve import har_path, run_probe, run_reservation
 
 logging.basicConfig(
     level=logging.INFO,
@@ -482,6 +482,21 @@ async def reservar_typed(update: Update, context: ContextTypes.DEFAULT_TYPE):
 PROBE_LEAD = timedelta(seconds=90)  # log in this long before 08:00
 
 
+async def send_traffic(app: Application, chat_id: int, screenshot_dir: str):
+    """With RECORD_HAR=1, send the recorded (credential-redacted) site traffic, then delete it."""
+    path = har_path(screenshot_dir)
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "rb") as f:
+            await app.bot.send_document(chat_id=chat_id, document=f, filename=os.path.basename(path),
+                                        caption="🎥 Tráfico grabado (usuario y contraseña ocultos)")
+    except Exception:
+        log.exception("Could not send traffic recording to chat %s", chat_id)
+    finally:
+        os.remove(path)
+
+
 async def send_probe_report(app: Application, chat_id: int, title: str, result: dict):
     text = title + "\n\n" + "\n".join(result["lines"])
     # Telegram caps messages at 4096 characters.
@@ -496,10 +511,11 @@ async def send_probe_report(app: Application, chat_id: int, title: str, result: 
 async def run_probe_job(app: Application, chat_id: int, open_at_iso: str | None):
     u = get_user(chat_id)
     open_at = datetime.fromisoformat(open_at_iso) if open_at_iso else None
+    probe_dir = f"screenshots/{chat_id}/probe"
     log.info("Running probe for chat %s (open_at=%s)", chat_id, open_at_iso)
     try:
         result = await run_probe(u["tennis_user"], u["tennis_pass"], open_at=open_at,
-                                 screenshot_dir=f"screenshots/{chat_id}/probe")
+                                 screenshot_dir=probe_dir)
     except Exception as e:
         log.exception("Probe crashed for chat %s", chat_id)
         result = {"success": False, "lines": [f"❌ {e}"], "screenshots": []}
@@ -509,6 +525,7 @@ async def run_probe_job(app: Application, chat_id: int, open_at_iso: str | None)
         await send_probe_report(app, chat_id, title, result)
     except Exception:
         log.exception("Could not send probe report to chat %s", chat_id)
+    await send_traffic(app, chat_id, probe_dir)
 
 
 async def probar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -642,6 +659,7 @@ async def run_pending_reservation(app: Application, chat_id: int, entry: dict):
         return
 
     open_at = datetime.fromisoformat(entry["run_at"])
+    shot_dir = f"screenshots/{chat_id}"
     log.info("Running one-off reservation for chat %s: %s", chat_id, entry["date"])
     try:
         result = await run_reservation(
@@ -651,7 +669,7 @@ async def run_pending_reservation(app: Application, chat_id: int, entry: dict):
             hour=entry["hour"],
             days_ahead=days_ahead,
             partner=entry["partner"],
-            screenshot_dir=f"screenshots/{chat_id}",
+            screenshot_dir=shot_dir,
             open_at=open_at if open_at > datetime.now(TZ) else None,
         )
     except Exception as e:
@@ -671,6 +689,7 @@ async def run_pending_reservation(app: Application, chat_id: int, entry: dict):
                 await app.bot.send_photo(chat_id=chat_id, photo=f)
     except Exception:
         log.exception("Could not notify chat %s", chat_id)
+    await send_traffic(app, chat_id, shot_dir)
 
 
 async def post_init(app: Application):

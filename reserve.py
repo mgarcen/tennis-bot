@@ -1,7 +1,9 @@
 import asyncio
+import gzip
 import os
 import re
 import time
+import urllib.parse
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
@@ -47,6 +49,53 @@ def row_courts(text):
 # Step screenshots cost ~0.5s each, which matters at 08:00. Only the final and failure
 # screenshots are taken unless SCREENSHOTS=all.
 ALL_SCREENSHOTS = os.environ.get("SCREENSHOTS", "").lower() == "all"
+
+
+# ── Traffic recording (RECORD_HAR=1): what the site is sent, to rebuild it without a browser
+RECORD_HAR = os.environ.get("RECORD_HAR") == "1"
+
+
+def har_path(screenshot_dir):
+    return f"{screenshot_dir}/traffic.har.gz"
+
+
+async def new_context(browser, screenshot_dir):
+    kwargs = {"viewport": {"width": 1280, "height": 900}, "locale": "es-UY"}
+    if RECORD_HAR:
+        os.makedirs(screenshot_dir, exist_ok=True)
+        kwargs.update(record_har_path=f"{screenshot_dir}/traffic.har",
+                      record_har_url_filter="**/deporyatenis/**",
+                      record_har_content="embed")
+    return await browser.new_context(**kwargs)
+
+
+async def close_context(context, screenshot_dir, username, password):
+    """Close the context (this is when Playwright writes the HAR), then redact and gzip it."""
+    try:
+        await context.close()
+    except Exception:
+        pass
+    raw = f"{screenshot_dir}/traffic.har"
+    if not (RECORD_HAR and os.path.exists(raw)):
+        return
+    with open(raw, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    os.remove(raw)
+    # Never let the credentials leave the server: every spelling they could take in a request.
+    for secret, mask in ((password, "<PASSWORD>"), (username, "<USERNAME>")):
+        if not secret:
+            continue
+        for form in {secret, urllib.parse.quote(secret, safe=""), urllib.parse.quote_plus(secret),
+                     json_escape(secret)}:
+            text = text.replace(form, mask)
+    with gzip.open(har_path(screenshot_dir), "wt", encoding="utf-8") as f:
+        f.write(text)
+    print(f"  🎥  traffic recorded → {har_path(screenshot_dir)}")
+
+
+def json_escape(value):
+    import json
+    return json.dumps(value)[1:-1]
 
 
 async def debug_shot(page, name, screenshot_dir):
@@ -163,7 +212,7 @@ async def scan_surface(page, hour_tuple, court_num):
                 result["state"], result["row"] = "free", row
             else:
                 print(f"      • row {i} is Cancha {court_num} at {fmt_hour(hour_tuple)}, "
-                      f"Reserva link hidden (already booked)")
+                      f"Reserva link hidden (already booked): {' '.join(text.split())[:80]}")
                 if result["state"] != "free":
                     result["state"] = "taken"
         elif free and len(courts) == 1:
@@ -359,7 +408,7 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(viewport={"width": 1280, "height": 900}, locale="es-UY")
+        context = await new_context(browser, screenshot_dir)
         page = await context.new_page()
 
         try:
@@ -563,6 +612,7 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
             return {"success": False, "message": short_message, "screenshot": error_shot}
 
         finally:
+            await close_context(context, screenshot_dir, username, password)
             await browser.close()
 
 
@@ -624,7 +674,7 @@ async def run_probe(username, password, open_at=None, screenshot_dir="screenshot
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(viewport={"width": 1280, "height": 900}, locale="es-UY")
+        context = await new_context(browser, screenshot_dir)
         page = await context.new_page()
         try:
             await open_schedule(page, username, password, lap)
@@ -697,6 +747,7 @@ async def run_probe(username, password, open_at=None, screenshot_dir="screenshot
                 pass
             return {"success": False, "lines": lines, "screenshots": shots}
         finally:
+            await close_context(context, screenshot_dir, username, password)
             await browser.close()
 
 
