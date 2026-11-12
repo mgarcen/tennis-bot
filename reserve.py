@@ -64,7 +64,9 @@ async def new_context(browser, screenshot_dir):
     if RECORD_HAR:
         os.makedirs(screenshot_dir, exist_ok=True)
         kwargs.update(record_har_path=f"{screenshot_dir}/traffic.har",
-                      record_har_url_filter="**/deporyatenis/**",
+                      # Only the pages and their events: the scripts and images are public
+                      # and would make an 08:00 run (a reload every few seconds) huge.
+                      record_har_url_filter=re.compile(r"/deporyatenis/.*\.aspx"),
                       record_har_content="embed")
     return await browser.new_context(**kwargs)
 
