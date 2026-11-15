@@ -156,13 +156,17 @@ async def act_and_wait(page, action, max_wait):
     await asyncio.sleep(0.25)
 
 
-async def wait_gx_ready(target, timeout=15):
-    """Wait until the site's scripts on a page or frame have loaded and wired its controls."""
+async def wait_gx_ready(target, timeout=15, for_clicks=False):
+    """Wait until the site's scripts on a page or frame have loaded and wired its controls.
+
+    for_clicks: also wait until the site accepts clicks. It ignores them for 2 seconds
+    after loading (gx.evt.userReady), which is how the first Buscar click kept being lost.
+    """
+    ready = "document.gxReadyState === 'complete' && !!window.gx"
+    if for_clicks:
+        ready += " && gx.evt.userReady === true"
     try:
-        await target.wait_for_function(
-            "document.gxReadyState === 'complete' && !!window.gx",
-            timeout=timeout * 1000, polling=100,
-        )
+        await target.wait_for_function(ready, timeout=timeout * 1000, polling=50)
         return True
     except Exception:
         return False
@@ -204,7 +208,9 @@ async def type_partner_search(page, frame, text, attempts=5):
     searches = []
 
     def on_request(request):
-        if request.method == "POST" and "xselsociodatos" in request.url.lower():
+        # The search is a GET to the popup's own address, marked gx-no-cache.
+        url = request.url.lower()
+        if "xselsociodatos" in url and "gx-no-cache" in url:
             searches.append(request)
 
     page.on("request", on_request)
@@ -687,7 +693,7 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
             # box only opened on a later retry click, and a further click then hit the box
             # covering the button and timed out. So wait for the scripts, click, and click
             # again only while no search box has appeared.
-            if not await wait_gx_ready(page):
+            if not await wait_gx_ready(page, for_clicks=True):
                 print("   ⚠ Booking screen scripts not reported ready — clicking anyway")
             deadline = time.monotonic() + 30
             clicked_at = None
@@ -789,8 +795,18 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
                 f"[id*='SOCIOFULLNOMBREAPELLIDO']:has-text('{partner_upper}') a"
             ).first
             await partner_el.wait_for(timeout=15000)
-            # The selection posts back before Confirmar will accept it; wait for that.
-            await act_and_wait(working_page, partner_el.click, max_wait=1)
+            # Selecting closes the search box and reports the partner to the booking
+            # screen; Confirmar only counts them once that request has been answered.
+            try:
+                async with page.expect_response(
+                    lambda r: r.request.method == "POST" and "horaactual.aspx" in r.url.lower(),
+                    timeout=10000,
+                ) as answered:
+                    await partner_el.click()
+                await (await answered.value).finished()
+            except PlaywrightTimeout:
+                print("   ⚠ The booking screen did not answer the partner selection")
+            await asyncio.sleep(0.3)
             print(f"   ✔ Selected {partner}")
             await debug_shot(working_page, "08_partner_selected", screenshot_dir)
 
