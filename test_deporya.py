@@ -213,6 +213,51 @@ case("AES-128 (FIPS-197 example)",
      "69c4e0d86a7b0430d8cdb78070b4c55a")
 case("event address token, as recorded from the real site", d.ajax_token(KEY, IV),
      "c01d04b1610243d2a2af23e7952e8b18ba3efe338a9d51348efc3957c07afef3")
+
+
+def _search_cases():
+    """The partner search box and the booking screen, as recorded on 2026-11-15."""
+    two_blocks = "gxajaxGridRefresh_Grid1,Kevin,1,S"            # 33 characters → 3 blocks
+    token = bytes.fromhex(d.gx_encrypt(KEY, IV, two_blocks))
+    plain = two_blocks.encode().ljust(48, b"\0")
+    chained = d.aes128_encrypt_block(bytes.fromhex(KEY), bytes(a ^ b for a, b in zip(plain[16:32], token[16:32])))
+    case("longer texts are encrypted block after block (CBC)", (len(token), token[32:48]), (64, chained))
+
+    js = ('this.EvtParms["SOCIOFULLNOMBREAPELLIDO.CLICK"]=[[{av:"A39",fld:"SOCIOID",pic:"ZZZZZZZZZ9",hsh:!0},'
+          '{av:"AV8",fld:"vEMPRESAID",pic:"ZZZZZZZZZ9",hsh:!0},{av:"A43",fld:"SOCIOFULLNOMBREAPELLIDO",pic:"",hsh:!0},'
+          '{av:"AV6",fld:"vXSOCIODOC",pic:""},{av:"AV10",fld:"vHORA",pic:"99:99",hsh:!0},'
+          '{av:\'gx.fn.getCtrlProperty("vBTN","Visible")\',ctrl:"vBTN",prop:"Visible"}],[]];')
+    popup = d.GxPage("https://x/deporyatenis/xselsociodatos.aspx?abc",
+                     page({"vEMPRESAID": "1", "gxhash_vEMPRESAID": "h-emp", "nRC_GXsfl_20": "0",
+                           "Grid1ContainerDataV": "[]", "vHORA": "0001/01/01 12:00:00",
+                           "gxhash_vHORA": "h-hora", "vBTN_Visible": "-1"}), js)
+    popup.apply({"gxHiddens": {"gxhash_SOCIOID_0002": "h-id2", "gxhash_SOCIOFULLNOMBREAPELLIDO_0002": "h-name2"},
+                 "gxGrids": [{"GridName": "Grid1",
+                              "0": {"Props": [["SOCIOID_0001", "  746", "746"], ["SOCIOFULLNOMBREAPELLIDO_0001", "", "ANA PAZ"]]},
+                              "1": {"Props": [["SOCIOID_0002", " 4281", "4281"], ["SOCIOFULLNOMBREAPELLIDO_0002", "", "KEVIN MONZON "]]}}]})
+    found = d.partners_of(popup)
+    case("search results are read from the answer", [(p.row, p.id, p.name) for p in found],
+         [(1, 746, "ANA PAZ"), (2, 4281, "KEVIN MONZON")])
+    case("a partner is matched whatever the word order or accents; part of a name only if one fits",
+         (d.pick_partner(found, "monzón kevin").id, d.pick_partner(found, "Paz").id,
+          d.pick_partner(found + [d.Partner(1, popup.rows)], "Paz"), d.pick_partner(found, "Lopez")),
+         (4281, 746, None, None))
+    body = popup.body("SOCIOFULLNOMBREAPELLIDO.CLICK", row=2, grid=20)
+    case("picking a result sends that row's values, a never-filled box as empty text, "
+         "a time of day dated 2001 and a shown control as true",
+         body["parms"], [4281, 1, "KEVIN MONZON", "", "2001/01/01 12:00:00", True])
+    case("…with that row's signatures, marked with the row",
+         body["hsh"], [{"hsh": "h-id2", "row": "0002"}, {"hsh": "h-emp", "row": ""},
+                       {"hsh": "h-name2", "row": "0002"}, {"hsh": "h-hora", "row": ""}])
+    case("…and the rows before it counted", (body["grids"], body["row"]),
+         ({"Grid1": {"id": 20, "lastRow": 1, "pRow": ""}}, "0002"))
+    url = popup.refresh_url("Grid1", ["Kevin", "1", "S", "20261115"], now_ms=7)
+    case("the search address is the page's own, without its query",
+         (url.split("?")[0], url.rsplit(",", 1)[1], len(url.split("?")[1].split(",")[0])),
+         ("https://x/deporyatenis/xselsociodatos.aspx", "gx-no-cache=7", 128))
+
+
+_search_cases()
 case("event names with and without quotes are both read",
      sorted(d.parse_evt_parms(HORAS_JS + INICIO_JS)), ["'DOBTNRESERVAR'", "REFRESH", "VRESERVARHORA.CLICK"])
 

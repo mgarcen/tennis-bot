@@ -21,7 +21,7 @@ from telegram.ext import (
     filters,
 )
 
-from deporya import run_direct_probe
+from deporya import run_direct_probe, run_direct_rehearsal
 from reserve import har_path, run_probe, run_reservation
 
 logging.basicConfig(
@@ -546,6 +546,23 @@ async def run_direct_probe_job(app: Application, chat_id: int, court: str | None
 REHEARSAL_DAYS = {"hoy": 0, "mañana": 1, "manana": 1, "pasado": 2}
 
 
+async def run_direct_rehearsal_job(app: Application, chat_id: int, partner: str, days_ahead: int = 1):
+    u = get_user(chat_id)
+    shot_dir = f"screenshots/{chat_id}/directo"
+    log.info("Running browser-free rehearsal for chat %s", chat_id)
+    try:
+        result = await run_direct_rehearsal(u["tennis_user"], u["tennis_pass"], TZ, partner,
+                                            days_ahead=days_ahead, traffic_path=har_path(shot_dir))
+    except Exception as e:
+        log.exception("Direct rehearsal crashed for chat %s", chat_id)
+        result = {"success": False, "lines": [f"❌ {e}"], "screenshots": []}
+    try:
+        await send_probe_report(app, chat_id, "⚡🎭 Ensayo sin navegador (no reservé nada)", result)
+    except Exception:
+        log.exception("Could not send direct rehearsal report to chat %s", chat_id)
+    await send_traffic(app, chat_id, shot_dir)
+
+
 async def run_rehearsal_job(app: Application, chat_id: int, partner: str, days_ahead: int = 1):
     u = get_user(chat_id)
     shot_dir = f"screenshots/{chat_id}/ensayo"
@@ -581,6 +598,24 @@ async def probar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and context.args[0].lower() == "ahora":
         await update.message.reply_text("🔎 Probando ahora: entro, abro el día de mañana y te cuento cuánto tardó. No reservo nada.")
         app.create_task(run_probe_job(app, chat_id, None))
+        return
+
+    if len(context.args) >= 2 and [a.lower() for a in context.args[:2]] == ["directo", "ensayo"]:
+        # /probar directo ensayo [hoy|mañana|pasado] Nombre Apellido
+        rest = context.args[2:]
+        days_ahead, day_word = 1, "mañana"
+        if rest and rest[0].lower() in REHEARSAL_DAYS:
+            day_word = rest[0].lower()
+            days_ahead, rest = REHEARSAL_DAYS[day_word], rest[1:]
+        partner = " ".join(rest) or (u["partners"][-1] if u["partners"] else "")
+        if not partner:
+            await update.message.reply_text(
+                "Decime con quién: /probar directo ensayo [hoy|mañana|pasado] Nombre Apellido")
+            return
+        await update.message.reply_text(
+            f"⚡🎭 Ensayo sin navegador para {day_word} con {partner}: abro la reserva, busco y "
+            f"elijo al socio, y freno antes de Confirmar. No reservo nada.")
+        app.create_task(run_direct_rehearsal_job(app, chat_id, partner, days_ahead))
         return
 
     if context.args and context.args[0].lower() == "directo":
@@ -663,7 +698,9 @@ async def ayuda_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*/socios borrar Nombre* — borrar un partner\n"
         "*/probar* — mañana a las 08:00 miro cómo abre la reserva, sin reservar nada\n"
         "*/probar ahora* — pruebo ya que el bot puede entrar, sin reservar nada\n"
-        "*/probar directo* — lo mismo pero sin navegador (el modo rápido nuevo)\n\n"
+        "*/probar directo* — lo mismo pero sin navegador (el modo rápido nuevo)\n"
+        "*/probar directo ensayo Nombre Apellido* — las pantallas de reserva sin navegador, "
+        "hasta antes de Confirmar\n\n"
         "Te aviso por acá después de cada intento, con una captura de pantalla.\n\n"
         "Cada persona tiene su propia cuenta de DeporYA y su propia programación — "
         "lo que vos configures no afecta a nadie más.",

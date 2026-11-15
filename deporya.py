@@ -7,19 +7,22 @@ that event needs. Which values, and in which order, is published in <page>.js
 fields, dropdowns) and from whatever earlier responses changed. A few values are signed
 by the server (`gxhash_<field>`) and are sent back with their signature.
 
-Checked against traffic recorded from the real site on 2026-11-12: login, opening the
-schedule, loading a day and clicking a slot rebuild the browser's requests exactly.
-What happens after a slot is accepted (partner search, Confirmar) is not recorded yet,
-so booking still goes through the browser flow in reserve.py.
+Checked against traffic recorded from the real site (2026-11-12 to 2026-11-15): login,
+opening the schedule, loading a day, clicking a slot, Buscar, the partner search, picking
+a partner and reporting them to the booking screen rebuild the browser's requests
+exactly. Confirmar and the final "Sí" are not recorded yet, so booking still goes
+through the browser flow in reserve.py.
 """
 from __future__ import annotations
 
+import gzip
 import html as html_lib
 import json
+import os
 import re
 import time
-from datetime import date, datetime
-from urllib.parse import urljoin, urlsplit
+from datetime import date, datetime, timezone
+from urllib.parse import quote, quote_plus, urljoin, urlsplit
 
 BASE_URL = "https://agenbot.net/deporyatenis"
 USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -215,18 +218,29 @@ def aes128_encrypt_block(key, block):
     return bytes(s)
 
 
+def gx_encrypt(key_hex, iv_hex, text):
+    """How the site's script encrypts what it puts in a URL: IV + AES-CBC(zero-padded text)."""
+    key, prev = bytes.fromhex(key_hex), bytes.fromhex(iv_hex)
+    plain = text.encode("utf-8")
+    plain = plain.ljust(max(16, -(-len(plain) // 16) * 16), b"\0")
+    out = b""
+    for i in range(0, len(plain), 16):
+        prev = aes128_encrypt_block(key, bytes(a ^ b for a, b in zip(plain[i:i + 16], prev)))
+        out += prev
+    return (iv_hex + out.hex()).lower()
+
+
 def ajax_token(key_hex, iv_hex):
-    """What the browser puts first in an event URL: IV + AES-CBC("gxfullajaxEvt")."""
-    iv = bytes.fromhex(iv_hex)
-    plain = b"gxfullajaxEvt".ljust(16, b"\0")
-    cipher = aes128_encrypt_block(bytes.fromhex(key_hex), bytes(a ^ b for a, b in zip(plain, iv)))
-    return (iv_hex + cipher.hex()).lower()
+    """What the browser puts first in an event URL."""
+    return gx_encrypt(key_hex, iv_hex, "gxfullajaxEvt")
 
 
 # ── One loaded page ──────────────────────────────────────────────────────────────
 
 _DATE_YMD = re.compile(r"^\d{4}/\d\d/\d\d$")
 _DATE_DMY = re.compile(r"^(\d\d)/(\d\d)/(\d\d)$")
+_NUMBER_PIC = re.compile(r"^[Z9]+$")
+_NO_DATE = "0001/01/01 "
 
 
 class GxPage:
@@ -238,6 +252,7 @@ class GxPage:
         self.hiddens, self.fields, self.combos = parse_page(text)
         self.events = parse_evt_parms(js)
         self.values = {}          # set by the caller or by responses; wins over the page
+        self.rows = {}            # grid cells from responses: {"SOCIOID_0003": "4281", ...}
         self.refreshed = set()    # grids an event response has redrawn
         self._fld_of = {s["av"]: s["fld"] for specs in self.events.values()
                         for s in specs if "av" in s and "fld" in s}
@@ -258,21 +273,32 @@ class GxPage:
             return self.combos[fld]["s"]
         return self.hiddens.get(fld)
 
-    def _parm(self, spec):
+    def _parm(self, spec, row=None):
         if "fld" in spec:
-            value = self.get(spec["fld"])
-            if re.search(r"[Z9]", spec.get("pic", "")):
-                return int(str(value).strip() or 0)
+            value = self._row_value(spec["fld"], row)
+            if value is None:
+                value = self.get(spec["fld"])
+            if _NUMBER_PIC.match(spec.get("pic", "")):
+                return int(str(value or 0).strip() or 0)
+            if value is None and "pic" in spec:
+                return ""                     # a text box that was never filled in
             if isinstance(value, str):
                 if _DATE_YMD.match(value):
                     return value + " 00:00:00"
                 m = _DATE_DMY.match(value)
                 if m:
                     return f"20{m.group(3)}/{m.group(2)}/{m.group(1)} 00:00:00"
+                if value.startswith(_NO_DATE):    # a time of day: the script dates it 2001
+                    return "2001/01/01 " + value[len(_NO_DATE):]
+            if "grid" in spec and isinstance(value, list):
+                # A list shown as a grid travels with its current item (seen with one item).
+                return [{"pRow": "", "c": value, "v": value[0] if value else {}}]
             return value
         if "ctrl" in spec and spec.get("prop") == "GridRC":
             return {"gridRC": self.hiddens.get(f"nRC_GXsfl_{spec['grid']}", "0"),
                     "rowSuffix": "", "grid": spec["grid"]}
+        if "ctrl" in spec and spec.get("prop") == "Visible":
+            return str(self.hiddens.get(f"{spec['ctrl']}_Visible", "1")) != "0"
         if "ctrl" in spec and "prop" in spec:
             return self.hiddens.get(f"{spec['ctrl']}_{spec['prop']}")
         if "ctrl" in spec:
@@ -281,7 +307,13 @@ class GxPage:
                     "v": combo["v"]}
         return self.values.get(spec["av"], self.hiddens.get(spec["av"]))
 
-    def _grids(self):
+    def _row_value(self, fld, row):
+        """A grid column's value on `row` (1-based), or None if `fld` is not a column."""
+        if row is None:
+            return None
+        return self.rows.get(f"{fld}_{row:04d}")
+
+    def _grids(self, row=None, grid=None):
         grids = {}
         for key, count in self.hiddens.items():
             if not key.startswith("nRC_GXsfl_"):
@@ -296,6 +328,8 @@ class GxPage:
                 name = next(iter(self._grid_names.values()))
             if name:
                 last = 0 if grid_id in self.refreshed else int(count or 0)
+                if row is not None and grid_id == grid:
+                    last = row - 1            # an event on a row: the rows before it
                 grids[name] = {"id": grid_id, "lastRow": last, "pRow": ""}
         return grids
 
@@ -307,19 +341,35 @@ class GxPage:
         specs = self.events[event]
         body = {
             "MPage": False, "cmpCtx": "",
-            "parms": [self._parm(s) for s in specs],
-            "hsh": [{"hsh": self.hiddens.get("gxhash_" + s["fld"]), "row": ""}
-                    for s in specs if s.get("hsh") and "fld" in s],
+            "parms": [self._parm(s, row) for s in specs],
+            "hsh": [self._hsh(s["fld"], row) for s in specs if s.get("hsh") and "fld" in s],
             "objClass": self.name, "pkgName": "GeneXus.Programs",
             "events": [event],
         }
         if row is not None:
             body["grid"] = grid
-        body["grids"] = self._grids()
+        body["grids"] = self._grids(row, grid)
         if row is not None:
             body["row"] = f"{row:04d}"
             body["pRow"] = ""
         return body
+
+    def _hsh(self, fld, row):
+        if self._row_value(fld, row) is not None:
+            return {"hsh": self.hiddens.get(f"gxhash_{fld}_{row:04d}"), "row": f"{row:04d}"}
+        return {"hsh": self.hiddens.get("gxhash_" + fld), "row": ""}
+
+    def refresh_url(self, grid_name, parms, now_ms=None):
+        """Where the script GETs a grid's rows again (a search box does this on every key)."""
+        parts = urlsplit(self.url)
+        token = gx_encrypt(self.hiddens["GX_AJAX_KEY"], self.hiddens["GX_AJAX_IV"],
+                           ",".join([f"gxajaxGridRefresh_{grid_name}"] + [str(p) for p in parms]))
+        return (f"{parts.scheme}://{parts.netloc}{parts.path}?{token},"
+                f"gx-no-cache={now_ms or int(time.time() * 1000)}")
+
+    def refresh_headers(self):
+        return {"GxAjaxRequest": "1", "AJAX_SECURITY_TOKEN": self.hiddens["AJAX_SECURITY_TOKEN"],
+                "Referer": self.url}
 
     def event_url(self, now_ms=None):
         parts = urlsplit(self.url)
@@ -352,6 +402,14 @@ class GxPage:
                 if isinstance(props, dict) and "Values" in props:
                     self.combos[ctrl] = _combo(props["Values"])
         for grid in response.get("gxGrids") or []:
+            cells = {}
+            for key, item in grid.items():
+                if key.isdigit() and isinstance(item, dict):
+                    for prop in item.get("Props") or []:
+                        if prop and isinstance(prop[0], str):
+                            cells[prop[0]] = str(prop[-1]).rstrip()
+            if cells:
+                self.rows = cells
             for key, value in grid.items():
                 if key.endswith(("_nEOF", "_nFirstRecordOnPage")):
                     self.values[key] = value
@@ -416,6 +474,55 @@ def pick_slot(slots, court, hour):
     return None, ("full" if wanted else "taken")
 
 
+class Partner:
+    """One row of the partner search. `row` is its 1-based position in the results."""
+
+    def __init__(self, row, cells):
+        self.row = row
+        self.id = int(cells.get(f"SOCIOID_{row:04d}") or 0)
+        self.doc = cells.get(f"SOCIODOC_{row:04d}", "")
+        self.name = cells.get(f"SOCIOFULLNOMBREAPELLIDO_{row:04d}", "")
+
+    def __repr__(self):
+        return f"<{self.name} #{self.id}>"
+
+
+def partners_of(page):
+    rows = sorted(int(k.rsplit("_", 1)[1]) for k in page.rows if k.startswith("SOCIOID_"))
+    return [Partner(r, page.rows) for r in rows]
+
+
+def pick_partner(partners, name):
+    """The search result that is `name` (words in any order, accents and case aside)."""
+    def words(text):
+        text = text.upper()
+        for a, b in zip("ÁÉÍÓÚÜ", "AEIOUU"):
+            text = text.replace(a, b)
+        return set(text.split())
+    wanted = words(name)
+    exact = [p for p in partners if words(p.name) == wanted]
+    if exact:
+        return exact[0]
+    close = [p for p in partners if wanted <= words(p.name)]
+    return close[0] if len(close) == 1 else None
+
+
+def write_traffic(path, entries, lines, secrets):
+    """Save what a browser-free run sent and got, in the shape of the browser recordings
+    (gzip, credentials masked), so both kinds can be read the same way."""
+    text = json.dumps({"log": {"creator": {"name": "deporya.py"}, "entries": entries,
+                               "_bot": {"commit": os.environ.get("RAILWAY_GIT_COMMIT_SHA", "?")[:7],
+                                        "lines": lines}}}, ensure_ascii=False)
+    for secret, mask in zip(secrets, ("<PASSWORD>", "<USERNAME>")):
+        if not secret:
+            continue
+        for form in {secret, quote(secret, safe=""), quote_plus(secret), json.dumps(secret)[1:-1]}:
+            text = text.replace(form, mask)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        f.write(text)
+
+
 # ── The client ───────────────────────────────────────────────────────────────────
 
 class DeporYA:
@@ -430,6 +537,22 @@ class DeporYA:
         )
         self._js = {}
         self.schedule = None   # the "Días disponibles" page, once opened
+        self.booking = None    # the booking screen of a slot, once one was accepted
+        self.search = None     # its partner search box, once opened
+        self.traffic = []      # every request and answer, for write_traffic()
+
+    def _record(self, r, started):
+        self.traffic.append({
+            "startedDateTime": started.isoformat().replace("+00:00", "Z"),
+            "time": (datetime.now(timezone.utc) - started).total_seconds() * 1000,
+            "request": {"method": r.request.method, "url": str(r.request.url),
+                        "headers": [{"name": k, "value": v} for k, v in r.request.headers.items()
+                                    if k.lower() != "cookie"],
+                        "postData": {"text": r.request.content.decode("utf-8", "replace")}},
+            "response": {"status": r.status_code,
+                         "headers": [],
+                         "content": {"mimeType": r.headers.get("content-type", ""), "text": r.text}},
+        })
 
     async def __aenter__(self):
         return self
@@ -439,7 +562,9 @@ class DeporYA:
 
     async def _load(self, url, referer=None):
         url = urljoin(self.base_url + "/", url)
+        started = datetime.now(timezone.utc)
         r = await self.http.get(url, headers={"Referer": referer} if referer else None)
+        self._record(r, started)
         r.raise_for_status()
         name = urlsplit(str(r.url)).path.rsplit("/", 1)[-1].split(".")[0].lower()
         if name not in self._js:
@@ -448,10 +573,14 @@ class DeporYA:
             self._js[name] = js.text
         return GxPage(str(r.url), r.text, self._js[name])
 
-    async def _fire(self, page, event, row=None, grid=None):
+    async def _fire(self, page, event, row=None, grid=None, may_be_empty=False):
         payload = json.dumps(page.body(event, row, grid), separators=(",", ":"), ensure_ascii=False)
+        started = datetime.now(timezone.utc)
         r = await self.http.post(page.event_url(), headers=page.headers(), content=payload.encode("utf-8"))
+        self._record(r, started)
         r.raise_for_status()
+        if may_be_empty and not r.text.strip():
+            return {}
         try:
             response = r.json()
         except ValueError:
@@ -498,6 +627,51 @@ class DeporYA:
         response = await self._fire(self.schedule, "VRESERVARHORA.CLICK", row=slot.row, grid=129)
         return {"next": redirect_of(response), "messages": messages(response), "raw": response}
 
+    async def open_booking(self, slot):
+        """Press 'Reserva' on a slot and open its booking screen. Returns click_slot's answer;
+        "next" is None when the site refused the slot (its reason is in "messages")."""
+        answer = await self.click_slot(slot)
+        if answer["next"]:
+            self.booking = await self._load(answer["next"], referer=self.schedule.url)
+        return answer
+
+    async def find_partners(self, text):
+        """Press Buscar on the booking screen and search its box for `text`. → [Partner]"""
+        response = await self._fire(self.booking, "'DOBOTONBUSCAR'")
+        popup = next((c["popup"][0] for c in response.get("gxCommands") or [] if "popup" in c), None)
+        if not popup:
+            raise SiteError("❌ Buscar no abrió la búsqueda de socios"
+                            + "".join(f": {t}" for t in messages(response)[:1]))
+        page = self.search = await self._load(popup + ",gxPopupLevel%3D0%3B", referer=self.booking.url)
+        # What the box sends on every key: the text, then three values of the page.
+        parms = [quote(text, safe=""), page.get("vEMPRESAID"), page.get("vBLOQUEACARNESALUD"),
+                 str(page.get("vTODAY") or "").replace("/", "")[:8]]
+        started = datetime.now(timezone.utc)
+        r = await self.http.get(page.refresh_url("Grid1", parms), headers=page.refresh_headers())
+        self._record(r, started)
+        r.raise_for_status()
+        try:
+            page.apply(r.json())
+        except ValueError:
+            raise SiteError("the partner search did not answer in JSON") from None
+        return partners_of(page)
+
+    async def choose_partner(self, partner):
+        """Pick a search result and report it to the booking screen, as closing the search
+        box does. Returns {"messages": [str], "players": [names], "raw": response}."""
+        picked = await self._fire(self.search, "SOCIOFULLNOMBREAPELLIDO.CLICK", row=partner.row,
+                                  grid=20, may_be_empty=True)
+        page = self.booking
+        page.values.update(vXSOCIOID=partner.id, vXSOCIODOC=partner.doc,
+                           vXSOCIOFULLNOMBREAPELLIDO=partner.name)
+        response = await self._fire(page, "GX.EXTENSIONS.WEB.POPUP.ONPOPUPCLOSED")
+        players = page.get("vSDTJUGADORES") or []
+        if isinstance(players, str):
+            players = json.loads(players)
+        return {"messages": messages(picked) + messages(response),
+                "players": [p.get("SocioFullNombreApellido", "") for p in players],
+                "raw": response}
+
 
 def today(tz):
     return datetime.now(tz).date()
@@ -541,3 +715,63 @@ async def run_direct_probe(username, password, tz, days_ahead=1, court=None, hou
     except Exception as e:
         lines.append(f"❌ {type(e).__name__}: {str(e).strip().splitlines()[0][:200] if str(e).strip() else ''}")
         return {"success": False, "lines": lines, "screenshots": []}
+
+
+async def run_direct_rehearsal(username, password, tz, partner, days_ahead=1, traffic_path=None,
+                               transport=None):
+    """The booking screens without a browser, up to the partner being on the booking, timing
+    each step. Never sends Confirmar, so nothing is booked.
+
+    Uses the first free slot of the day (like the browser rehearsal). With `traffic_path`,
+    everything sent and received is saved there (credentials masked).
+    """
+    lines = []
+    site = DeporYA(transport=transport)
+
+    async def timed(label, coro):
+        t = time.monotonic()
+        result = await coro
+        lines.append(f"{label}: {time.monotonic() - t:.2f}s")
+        return result
+
+    t0 = time.monotonic()
+    try:
+        await timed("login", site.login(username, password))
+        await timed("Días disponibles", site.open_schedule())
+        day = date.fromordinal(datetime.now(tz).date().toordinal() + days_ahead)
+        slots = await timed(f"leer el {day:%d/%m}", site.load_day(day))
+        slot = next((s for s in slots if s.free), None)
+        if slot is None:
+            lines.append(f"❌ El {day:%d/%m} no tiene ningún horario libre para ensayar")
+            return {"success": False, "lines": lines, "screenshots": []}
+        lines.append(f"ensayo sobre: Cancha {slot.court} {slot.hour}")
+        answer = await timed("abrir la reserva", site.open_booking(slot))
+        if not answer["next"]:
+            lines.append("❌ DeporYA no dejó abrir la reserva: "
+                         + (" / ".join(answer["messages"]) or "sin explicación"))
+            return {"success": False, "lines": lines, "screenshots": []}
+        found = await timed(f"buscar «{partner.split()[0]}»", site.find_partners(partner.split()[0]))
+        lines.append("resultados: " + (", ".join(p.name for p in found) or "ninguno"))
+        chosen = pick_partner(found, partner)
+        if chosen is None:
+            lines.append(f"❌ No encontré a {partner} entre los resultados")
+            return {"success": False, "lines": lines, "screenshots": []}
+        result = await timed(f"elegir a {chosen.name}", site.choose_partner(chosen))
+        lines.append("jugadores en la reserva: " + (", ".join(result["players"]) or "?"))
+        for text in result["messages"]:
+            lines.append(f"el sitio dice: {text}")
+        lines.append(f"total: {time.monotonic() - t0:.2f}s — frené antes de Confirmar")
+        ok = any(set(chosen.name.split()) <= set(name.split()) for name in result["players"])
+        if not ok:
+            lines.append("⚠️ El socio no quedó en la lista de jugadores")
+        return {"success": ok, "lines": lines, "screenshots": []}
+    except Exception as e:
+        lines.append(f"❌ {type(e).__name__}: {str(e).strip().splitlines()[0][:200] if str(e).strip() else ''}")
+        return {"success": False, "lines": lines, "screenshots": []}
+    finally:
+        await site.http.aclose()
+        if traffic_path:
+            try:
+                write_traffic(traffic_path, site.traffic, lines, (password, username))
+            except Exception as e:
+                lines.append(f"(no pude guardar el tráfico: {e})")
