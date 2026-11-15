@@ -131,6 +131,45 @@ async def act_and_wait(page, action, max_wait):
     await asyncio.sleep(0.25)
 
 
+async def type_partner_search(page, frame, text, attempts=5):
+    """Type `text` into the partner search box and make sure the site actually searched.
+
+    The search fires from key handlers that the site's scripts attach once they finish
+    loading. On 2026-11-13 the bot typed as soon as the box existed, before that: the
+    keystrokes did nothing, no search was sent and the booking stopped there. So wait
+    for the scripts, then retype until a search request leaves.
+    """
+    try:
+        await frame.wait_for_function(
+            "document.gxReadyState === 'complete' && !!window.gx",
+            timeout=10000, polling=100,
+        )
+    except Exception:
+        print("   ⚠ Search box scripts not reported ready — typing anyway")
+
+    searches = []
+
+    def on_request(request):
+        if request.method == "POST" and "xselsociodatos" in request.url.lower():
+            searches.append(request)
+
+    page.on("request", on_request)
+    try:
+        box = frame.locator("#vTEXTOBUSCAR")
+        for attempt in range(1, attempts + 1):
+            await box.fill("")
+            await box.press_sequentially(text, delay=40)
+            deadline = time.monotonic() + 2
+            while not searches and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+            if searches:
+                return True
+            print(f"   ⚠ Typing sent no search (attempt {attempt}/{attempts}) — retyping")
+        return False
+    finally:
+        page.remove_listener("request", on_request)
+
+
 async def screenshot(page, name, screenshot_dir):
     os.makedirs(screenshot_dir, exist_ok=True)
     path = f"{screenshot_dir}/{name}.png"
@@ -645,8 +684,9 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
             await debug_shot(working_page, "06_before_type", screenshot_dir)
 
             if target_frame:
-                await target_frame.evaluate("document.getElementById('vTEXTOBUSCAR').focus()")
-            await working_page.keyboard.type(partner.split()[0], delay=30)
+                await type_partner_search(working_page, target_frame, partner.split()[0])
+            else:
+                await working_page.keyboard.type(partner.split()[0], delay=30)
             print(f"   ✔ Typed '{partner.split()[0]}'")
             await debug_shot(working_page, "07_autocomplete", screenshot_dir)
 
@@ -658,7 +698,7 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
             partner_el = partner_frame.locator(
                 f"[id*='SOCIOFULLNOMBREAPELLIDO']:has-text('{partner_upper}') a"
             ).first
-            await partner_el.wait_for(timeout=8000)
+            await partner_el.wait_for(timeout=15000)
             # The selection posts back before Confirmar will accept it; wait for that.
             await act_and_wait(working_page, partner_el.click, max_wait=1)
             print(f"   ✔ Selected {partner}")
