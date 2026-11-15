@@ -156,6 +156,18 @@ async def act_and_wait(page, action, max_wait):
     await asyncio.sleep(0.25)
 
 
+async def wait_gx_ready(target, timeout=15):
+    """Wait until the site's scripts on a page or frame have loaded and wired its controls."""
+    try:
+        await target.wait_for_function(
+            "document.gxReadyState === 'complete' && !!window.gx",
+            timeout=timeout * 1000, polling=100,
+        )
+        return True
+    except Exception:
+        return False
+
+
 SEARCH_BOX_STATE_JS = """() => {
     const box = document.getElementById('vTEXTOBUSCAR');
     const o = window.gx && gx.O;
@@ -183,16 +195,10 @@ async def type_partner_search(page, frame, text, attempts=5):
     """Type `text` into the partner search box and make sure the site actually searched.
 
     The search fires from key handlers that the site's scripts attach once they finish
-    loading. On 2026-11-13 the bot typed as soon as the box existed, before that: the
-    keystrokes did nothing, no search was sent and the booking stopped there. So wait
-    for the scripts, then retype until a search request leaves.
+    loading, and keystrokes typed before that do nothing. So wait for the scripts, then
+    retype until a search request leaves.
     """
-    try:
-        await frame.wait_for_function(
-            "document.gxReadyState === 'complete' && !!window.gx",
-            timeout=10000, polling=100,
-        )
-    except Exception:
+    if not await wait_gx_ready(frame):
         print("   ⚠ Search box scripts not reported ready — typing anyway")
 
     searches = []
@@ -676,12 +682,15 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
 
             context.on("page", on_popup)
             url_before = page.url
-            await page.locator("#BTNBOTONBUSCAR").click()
-            # The site answers the click only once this page's scripts are up: 8-10s after
-            # the page arrives in every recorded run. An 8s limit here gave up just before
-            # the search box appeared, and the retry below then clicked a button that the
-            # box was already covering (2026-11-13 and the 2026-11-15 rehearsals).
+            # A click made before this page's scripts are up is simply lost: in every run
+            # from 2026-11-13 to 2026-11-15 the first Buscar click sent nothing, the search
+            # box only opened on a later retry click, and a further click then hit the box
+            # covering the button and timed out. So wait for the scripts, click, and click
+            # again only while no search box has appeared.
+            if not await wait_gx_ready(page):
+                print("   ⚠ Booking screen scripts not reported ready — clicking anyway")
             deadline = time.monotonic() + 30
+            clicked_at = None
             while time.monotonic() < deadline:
                 if popups or page.url != url_before:
                     break
@@ -692,6 +701,14 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
                         break
                 except Exception:
                     pass  # a frame was still loading; look again
+                if clicked_at is None or time.monotonic() - clicked_at > 6:
+                    if clicked_at is not None:
+                        print("   ⚠ Buscar click opened nothing — clicking again")
+                    try:
+                        await page.locator("#BTNBOTONBUSCAR").click(timeout=2000)
+                    except Exception as e:
+                        print(f"   ⚠ Buscar click failed: {str(e).splitlines()[0]}")
+                    clicked_at = time.monotonic()
                 await asyncio.sleep(0.1)
             context.remove_listener("page", on_popup)
 
@@ -738,7 +755,10 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
                     working_page = popup_page2
                     print(f"   ✔ Popup 2: {popup_page2.url}")
                 except PlaywrightTimeout:
-                    await buscar2.click()
+                    try:
+                        await buscar2.click(timeout=3000)
+                    except PlaywrightTimeout:
+                        pass  # the search box is already open and covering the button
                     await asyncio.sleep(3)
 
                 await screenshot(working_page, "06_after_buscar2", screenshot_dir)
