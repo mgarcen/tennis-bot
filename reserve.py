@@ -51,6 +51,19 @@ def row_courts(text):
 ALL_SCREENSHOTS = os.environ.get("SCREENSHOTS", "").lower() == "all"
 
 
+# ── Run log: every line a run prints is also kept, and travels inside the traffic file
+# (log._bot), so that one file says which version ran and where it stopped.
+RUN_LOG = []
+
+
+def print(*args, **kwargs):
+    import builtins
+    builtins.print(*args, **kwargs)
+    if kwargs.get("file") is None:
+        RUN_LOG.append(" ".join(str(a) for a in args))
+        del RUN_LOG[:-2000]
+
+
 # ── Traffic recording (RECORD_HAR=1): what the site is sent, to rebuild it without a browser
 RECORD_HAR = os.environ.get("RECORD_HAR") == "1"
 
@@ -78,11 +91,23 @@ async def close_context(context, screenshot_dir, username, password):
     except Exception:
         pass
     raw = f"{screenshot_dir}/traffic.har"
+    lines = list(RUN_LOG)
+    RUN_LOG.clear()
     if not (RECORD_HAR and os.path.exists(raw)):
         return
     with open(raw, encoding="utf-8", errors="replace") as f:
         text = f.read()
     os.remove(raw)
+    try:
+        import json
+        har = json.loads(text)
+        har["log"]["_bot"] = {
+            "commit": os.environ.get("RAILWAY_GIT_COMMIT_SHA", "?")[:7],
+            "lines": lines,
+        }
+        text = json.dumps(har, ensure_ascii=False)
+    except Exception as e:
+        print(f"  ⚠ Could not add the run log to the traffic file: {e}")
     # Never let the credentials leave the server: every spelling they could take in a request.
     for secret, mask in ((password, "<PASSWORD>"), (username, "<USERNAME>")):
         if not secret:
@@ -131,6 +156,29 @@ async def act_and_wait(page, action, max_wait):
     await asyncio.sleep(0.25)
 
 
+SEARCH_BOX_STATE_JS = """() => {
+    const box = document.getElementById('vTEXTOBUSCAR');
+    const o = window.gx && gx.O;
+    return {
+        ready: document.gxReadyState || null, gx: !!window.gx, obj: !!o,
+        grid: !!(o && o.Grid1Container), autoRefresh: o ? o.autoRefresh : null,
+        value: box ? box.value : null,
+        focused: document.activeElement ? document.activeElement.id : null,
+    };
+}"""
+
+DIRECT_SEARCH_JS = """text => {
+    const box = document.getElementById('vTEXTOBUSCAR');
+    const o = window.gx && gx.O;
+    if (!box || !o || !o.Grid1Container) return 'site scripts not loaded';
+    box.value = text;
+    o.AV7TextoBuscar = text;
+    o.Grid1Container.lastRefreshParms = null;
+    o.Grid1Container.filterVarChanged();
+    return 'asked the grid to refresh';
+}"""
+
+
 async def type_partner_search(page, frame, text, attempts=5):
     """Type `text` into the partner search box and make sure the site actually searched.
 
@@ -164,7 +212,22 @@ async def type_partner_search(page, frame, text, attempts=5):
                 await asyncio.sleep(0.05)
             if searches:
                 return True
-            print(f"   ⚠ Typing sent no search (attempt {attempt}/{attempts}) — retyping")
+            try:
+                state = await frame.evaluate(SEARCH_BOX_STATE_JS)
+            except Exception as e:
+                state = f"unreadable: {e}"
+            print(f"   ⚠ Typing sent no search (attempt {attempt}/{attempts}) — box: {state}")
+            if attempt >= 2:
+                # Typing is not reaching the site's handlers: ask its grid to search directly.
+                try:
+                    print(f"   → direct search: {await frame.evaluate(DIRECT_SEARCH_JS, text)}")
+                except Exception as e:
+                    print(f"   ⚠ Direct search failed: {e}")
+                deadline = time.monotonic() + 2
+                while not searches and time.monotonic() < deadline:
+                    await asyncio.sleep(0.05)
+                if searches:
+                    return True
         return False
     finally:
         page.remove_listener("request", on_request)
