@@ -677,14 +677,21 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
             context.on("page", on_popup)
             url_before = page.url
             await page.locator("#BTNBOTONBUSCAR").click()
-            deadline = time.monotonic() + 8
+            # The site answers the click only once this page's scripts are up: 8-10s after
+            # the page arrives in every recorded run. An 8s limit here gave up just before
+            # the search box appeared, and the retry below then clicked a button that the
+            # box was already covering (2026-11-13 and the 2026-11-15 rehearsals).
+            deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 if popups or page.url != url_before:
                     break
-                if await page.locator("#vTEXTOBUSCAR").count() > 0:
-                    break
-                if any([await f.locator("#vTEXTOBUSCAR").count() > 0 for f in page.frames[1:]]):
-                    break
+                try:
+                    if await page.locator("#vTEXTOBUSCAR").count() > 0:
+                        break
+                    if any([await f.locator("#vTEXTOBUSCAR").count() > 0 for f in page.frames[1:]]):
+                        break
+                except Exception:
+                    pass  # a frame was still loading; look again
                 await asyncio.sleep(0.1)
             context.remove_listener("page", on_popup)
 
