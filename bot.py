@@ -21,8 +21,8 @@ from telegram.ext import (
     filters,
 )
 
-from deporya import run_direct_probe, run_direct_rehearsal
-from reserve import har_path, run_probe, run_reservation
+from deporya import run_direct_probe, run_direct_rehearsal, run_direct_reservation
+from reserve import RECORD_HAR, har_path, run_probe, run_reservation
 
 logging.basicConfig(
     level=logging.INFO,
@@ -711,6 +711,8 @@ async def ayuda_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # How long before 08:00 the booking job logs in. At 08:00 itself the site is overloaded
 # (2026-11-11: login took 33s and the next click was lost), so get that done first.
 PREWARM_LEAD = timedelta(seconds=int(os.environ.get("PREWARM_SECONDS", "180")))
+# "direct" (default): book without a browser, falling back to it if that fails before "Sí".
+BOOKING_MODE = os.environ.get("BOOKING_MODE", "direct").lower()
 
 
 def pending_job_id(chat_id: int, date_key: str) -> str:
@@ -767,20 +769,51 @@ async def run_pending_reservation(app: Application, chat_id: int, entry: dict):
     open_at = datetime.fromisoformat(entry["run_at"])
     shot_dir = f"screenshots/{chat_id}"
     log.info("Running one-off reservation for chat %s: %s", chat_id, entry["date"])
-    try:
-        result = await run_reservation(
-            username=u["tennis_user"],
-            password=u["tennis_pass"],
-            court=entry["court"],
-            hour=entry["hour"],
-            days_ahead=days_ahead,
-            partner=entry["partner"],
-            screenshot_dir=shot_dir,
-            open_at=open_at if open_at > datetime.now(TZ) else None,
-        )
-    except Exception as e:
-        log.exception("One-off reservation crashed for chat %s", chat_id)
-        result = {"success": False, "message": str(e), "screenshot": None}
+
+    # Browser-free first (BOOKING_MODE=browser goes straight to the browser).
+    result = None
+    if BOOKING_MODE != "browser":
+        direct_dir = f"{shot_dir}/directo"
+        try:
+            direct = await run_direct_reservation(
+                u["tennis_user"], u["tennis_pass"], TZ, entry["court"], entry["hour"],
+                entry["partner"], days_ahead=days_ahead,
+                open_at=open_at if open_at > datetime.now(TZ) else None,
+                traffic_path=har_path(direct_dir) if RECORD_HAR else None,
+            )
+        except Exception as e:
+            log.exception("Direct reservation crashed for chat %s", chat_id)
+            direct = {"success": False, "message": str(e), "lines": [f"❌ {e}"], "confirm_sent": False}
+        try:
+            await send_probe_report(app, chat_id, "⚡ Reserva sin navegador",
+                                    {"lines": direct["lines"], "screenshots": []})
+        except Exception:
+            log.exception("Could not send direct report to chat %s", chat_id)
+        await send_traffic(app, chat_id, direct_dir)
+        if direct["success"] or direct["confirm_sent"]:
+            # After "Sí" a retry could double-book or be refused; report as it stands.
+            result = {"success": direct["success"], "message": direct["message"], "screenshot": None}
+        else:
+            try:
+                await app.bot.send_message(chat_id=chat_id, text="↪️ Pruebo con el navegador…")
+            except Exception:
+                pass
+
+    if result is None:
+        try:
+            result = await run_reservation(
+                username=u["tennis_user"],
+                password=u["tennis_pass"],
+                court=entry["court"],
+                hour=entry["hour"],
+                days_ahead=days_ahead,
+                partner=entry["partner"],
+                screenshot_dir=shot_dir,
+                open_at=open_at if open_at > datetime.now(TZ) else None,
+            )
+        except Exception as e:
+            log.exception("One-off reservation crashed for chat %s", chat_id)
+            result = {"success": False, "message": str(e), "screenshot": None}
 
     text = (
         f"✅ Reserva confirmada para el {entry['date']}: {result['message']}"

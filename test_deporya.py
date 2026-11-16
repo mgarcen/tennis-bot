@@ -256,6 +256,16 @@ def _search_cases():
          (url.split("?")[0], url.rsplit(",", 1)[1], len(url.split("?")[1].split(",")[0])),
          ("https://x/deporyatenis/xselsociodatos.aspx", "gx-no-cache=7", 128))
 
+    confirm_js = ('this.EvtParms["DVELOP_CONFIRMPANEL_ENTER.CLOSE"]=[[{av:"this.DVELOP_CONFIRMPANEL_ENTERContainer.Result",'
+                  'ctrl:"DVELOP_CONFIRMPANEL_ENTER",prop:"Result"},{av:"AV62",fld:"vPRECIOMONTOPARCIAL",pic:"ZZZZZZ9.99"},'
+                  '{av:"AV59",fld:"vPRECIOMONTO",pic:"ZZZZZZ9.99"}],[]];')
+    booking = d.GxPage("https://x/deporyatenis/horaactual.aspx?abc",
+                       page({"DVELOP_CONFIRMPANEL_ENTER_Result": "", "vPRECIOMONTOPARCIAL": "0,00",
+                             "vPRECIOMONTO": "1.250,50"}), confirm_js)
+    booking.hiddens["DVELOP_CONFIRMPANEL_ENTER_Result"] = "Yes"
+    case("the final confirmation says Yes, and prices go as the page's script reads them",
+         booking.body("DVELOP_CONFIRMPANEL_ENTER.CLOSE")["parms"], ["Yes", 0, 1250.5])
+
 
 _search_cases()
 case("event names with and without quotes are both read",

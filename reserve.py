@@ -281,13 +281,17 @@ def _is_grid_refresh(response):
             and '"REFRESH"' in (request.post_data or ""))
 
 
-async def act_and_wait_grid(page, action, timeout=12):
+async def act_and_wait_grid(page, action, timeout=45):
     """Run `action`, then wait until the schedule has received its new grid.
 
     Changing day is two requests: one that only updates the date label, then a REFRESH
     that brings the rows. Reading the grid after the first one (as act_and_wait does)
     reads the PREVIOUS day: on 2026-11-12 the bot spent 08:00 watching that day's grid
     instead of the 13th's. Returns False if no refresh was seen.
+
+    The wait is long because at 08:00 the site can take that long: on 2026-11-16 the rows
+    took 24.7s, the bot gave up at 12s, moved on to another surface, and that second
+    request then blocked the click on a court that was free.
     """
     try:
         async with page.expect_response(_is_grid_refresh, timeout=timeout * 1000) as info:
@@ -524,7 +528,9 @@ async def wait_for_opening(page, hour_tuple, court_num, options, target_short, d
     if row is not None and booked_court == court_num:
         lap(f"   ✔ Cancha {court_num} is already bookable — not waiting for {open_at:%H:%M}")
         return first
-    home = [(v, l) for v, l in options if l == found_on] or options
+    # Not known yet (the day had no rows before opening): the first list shows every
+    # court, so watch only that one rather than asking the site for each surface in turn.
+    home = [(v, l) for v, l in options if l == found_on] or options[:1]
     schedule_url = page.url
     lap(f"⏳  Pre-warmed; waiting for {open_at:%H:%M:%S} "
         f"(watching {', '.join(l for _, l in home)})")
@@ -661,7 +667,8 @@ async def run_reservation(username, password, court="5", hour="10:00", days_ahea
             # ── 4. CLICK RESERVAR ON THAT ROW ─────────────────────────────────
             lap(f"4️⃣  Reserving Cancha {booked_court} ({found_on}) at {fmt_hour(hour_tuple)} …")
             await act_and_wait(
-                page, lambda: row.locator("input[type=button], button, a").first.click(timeout=5000),
+                # Long enough to outlast the site's "loading" cover at 08:00.
+                page, lambda: row.locator("input[type=button], button, a").first.click(timeout=30000),
                 max_wait=5,
             )
             await debug_shot(page, "04_after_row_click", screenshot_dir)

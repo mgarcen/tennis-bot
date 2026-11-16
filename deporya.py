@@ -10,8 +10,9 @@ by the server (`gxhash_<field>`) and are sent back with their signature.
 Checked against traffic recorded from the real site (2026-11-12 to 2026-11-15): login,
 opening the schedule, loading a day, clicking a slot, Buscar, the partner search, picking
 a partner and reporting them to the booking screen rebuild the browser's requests
-exactly. Confirmar and the final "Sí" are not recorded yet, so booking still goes
-through the browser flow in reserve.py.
+exactly. Confirmar and the final "Sí" were never recorded: they are built from the site's
+own scripts (horaactual.js, the confirm panel's script) and checked by the result: after
+"Sí" the day is read again and the slot must show as booked.
 """
 from __future__ import annotations
 
@@ -21,7 +22,8 @@ import json
 import os
 import re
 import time
-from datetime import date, datetime, timezone
+import asyncio
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote, quote_plus, urljoin, urlsplit
 
 BASE_URL = "https://agenbot.net/deporyatenis"
@@ -240,6 +242,22 @@ def ajax_token(key_hex, iv_hex):
 _DATE_YMD = re.compile(r"^\d{4}/\d\d/\d\d$")
 _DATE_DMY = re.compile(r"^(\d\d)/(\d\d)/(\d\d)$")
 _NUMBER_PIC = re.compile(r"^[Z9]+$")
+_DECIMAL_PIC = re.compile(r"^[Z9]+\.9+$")
+
+
+def _decimal(value):
+    """A price as the page's script reads it ("1.234,50" on the page, or a plain number)."""
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        text = str(value or "").strip()
+        if "," in text:
+            text = text.replace(".", "").replace(",", ".")
+        try:
+            number = float(text or 0)
+        except ValueError:
+            number = 0.0
+    return int(number) if number.is_integer() else number
 _NO_DATE = "0001/01/01 "
 
 
@@ -253,6 +271,7 @@ class GxPage:
         self.events = parse_evt_parms(js)
         self.values = {}          # set by the caller or by responses; wins over the page
         self.rows = {}            # grid cells from responses: {"SOCIOID_0003": "4281", ...}
+        self.grid_rows = {}       # rows each grid was redrawn with: {"Grid1": 4}
         self.refreshed = set()    # grids an event response has redrawn
         self._fld_of = {s["av"]: s["fld"] for specs in self.events.values()
                         for s in specs if "av" in s and "fld" in s}
@@ -280,6 +299,8 @@ class GxPage:
                 value = self.get(spec["fld"])
             if _NUMBER_PIC.match(spec.get("pic", "")):
                 return int(str(value or 0).strip() or 0)
+            if _DECIMAL_PIC.match(spec.get("pic", "")):
+                return _decimal(value)
             if value is None and "pic" in spec:
                 return ""                     # a text box that was never filled in
             if isinstance(value, str):
@@ -327,7 +348,9 @@ class GxPage:
             if name is None and len(self._grid_names) == 1:
                 name = next(iter(self._grid_names.values()))
             if name:
-                last = 0 if grid_id in self.refreshed else int(count or 0)
+                last = int(count or 0)
+                if grid_id in self.refreshed:
+                    last = self.grid_rows.get(name, 0)   # the browser counts the rows it was sent
                 if row is not None and grid_id == grid:
                     last = row - 1            # an event on a row: the rows before it
                 grids[name] = {"id": grid_id, "lastRow": last, "pRow": ""}
@@ -402,6 +425,8 @@ class GxPage:
                 if isinstance(props, dict) and "Values" in props:
                     self.combos[ctrl] = _combo(props["Values"])
         for grid in response.get("gxGrids") or []:
+            if grid.get("GridName"):
+                self.grid_rows[grid["GridName"]] = sum(1 for k in grid if k.isdigit())
             cells = {}
             for key, item in grid.items():
                 if key.isdigit() and isinstance(item, dict):
@@ -528,11 +553,12 @@ def write_traffic(path, entries, lines, secrets):
 class DeporYA:
     """A logged-in session. Use as `async with DeporYA() as site:`."""
 
-    def __init__(self, base_url=BASE_URL, timeout=30.0, transport=None):
+    def __init__(self, base_url=BASE_URL, timeout=60.0, transport=None):
         import httpx
         self.base_url = base_url.rstrip("/")
         self.http = httpx.AsyncClient(
-            timeout=timeout, follow_redirects=True, transport=transport,
+            timeout=timeout,  # at 08:00 the site has taken 25s to answer one request
+            follow_redirects=True, transport=transport,
             headers={"User-Agent": USER_AGENT, "Accept-Language": "es-UY"},
         )
         self._js = {}
@@ -672,6 +698,24 @@ class DeporYA:
                 "players": [p.get("SocioFullNombreApellido", "") for p in players],
                 "raw": response}
 
+    async def confirm(self):
+        """Press Confirmar, then "Sí" on the dialog it opens. This is what books.
+
+        Returns {"asked": bool, "sent": bool, "messages": [str], "next": url | None}.
+        "asked" is False when the site answered Confirmar with something other than its
+        "¿Confirma la reserva?" dialog (then nothing was sent and "messages" says why).
+        """
+        page = self.booking
+        asked = await self._fire(page, "ENTER", may_be_empty=True)
+        notes = messages(asked)
+        if "DVELOP_CONFIRMPANEL_ENTER" not in json.dumps(asked):
+            return {"asked": False, "sent": False, "messages": notes,
+                    "next": redirect_of(asked), "raw": asked}
+        page.hiddens["DVELOP_CONFIRMPANEL_ENTER_Result"] = "Yes"      # the "Sí" button
+        done = await self._fire(page, "DVELOP_CONFIRMPANEL_ENTER.CLOSE", may_be_empty=True)
+        return {"asked": True, "sent": True, "messages": notes + messages(done),
+                "next": redirect_of(done), "raw": done}
+
 
 def today(tz):
     return datetime.now(tz).date()
@@ -768,6 +812,114 @@ async def run_direct_rehearsal(username, password, tz, partner, days_ahead=1, tr
     except Exception as e:
         lines.append(f"❌ {type(e).__name__}: {str(e).strip().splitlines()[0][:200] if str(e).strip() else ''}")
         return {"success": False, "lines": lines, "screenshots": []}
+    finally:
+        await site.http.aclose()
+        if traffic_path:
+            try:
+                write_traffic(traffic_path, site.traffic, lines, (password, username))
+            except Exception as e:
+                lines.append(f"(no pude guardar el tráfico: {e})")
+
+
+async def run_direct_reservation(username, password, tz, court, hour, partner, days_ahead=1,
+                                 open_at=None, traffic_path=None, transport=None,
+                                 window=timedelta(seconds=90)):
+    """Book `court` at `hour` with `partner`, `days_ahead` days from today, without a browser.
+
+    With `open_at` (08:00 the day before), log in first, then read the day from
+    `open_at` on until it opens, one request at a time. Takes the court asked for, or the
+    closest-numbered free court on its surface at that hour.
+
+    Returns {"success", "message", "lines", "confirm_sent"}. confirm_sent=True means "Sí"
+    went out: then the booking may exist even if this run could not confirm it, so don't
+    try again blindly.
+    """
+    lines, t0 = [], time.monotonic()
+    site = DeporYA(transport=transport)
+    confirm_sent = False
+
+    def note(text):
+        lines.append(f"[{time.monotonic() - t0:5.1f}s] {text}")
+
+    def done(success, message):
+        note(("✅ " if success else "❌ ") + message)
+        return {"success": success, "message": message, "lines": lines, "confirm_sent": confirm_sent}
+
+    try:
+        await site.login(username, password)
+        note("login")
+        await site.open_schedule()
+        note("Días disponibles")
+        day = date.fromordinal(datetime.now(tz).date().toordinal() + days_ahead)
+
+        if open_at is not None:
+            wait = (open_at - datetime.now(tz)).total_seconds()
+            if wait > 0:
+                note(f"esperando a las {open_at:%H:%M:%S} ({wait:.0f}s)")
+                await asyncio.sleep(wait)
+        deadline = datetime.now(tz) + (window if open_at is not None else timedelta(seconds=20))
+
+        tries, slot, why = 0, None, "missing"
+        while True:
+            tries += 1
+            try:
+                slots = await site.load_day(day)
+            except SiteError as e:
+                slots = []
+                note(f"lectura {tries}: {e}")
+            if slots:
+                slot, why = pick_slot(slots, int(court), hour)
+                if slot is not None or why in ("taken", "full"):
+                    break
+            if datetime.now(tz) >= deadline:
+                break
+            await asyncio.sleep(0.2)
+        note(f"día leído ({tries} lectura{'s' if tries > 1 else ''}): "
+             + (f"Cancha {slot.court} {slot.hour} libre" if slot else why))
+        if slot is None:
+            return done(False, {
+                "taken": f"Cancha {court} a las {hour} ya está reservada y no hay otra libre en esa superficie",
+                "full": f"Cancha {court} a las {hour} no está libre y no hay otra libre en esa superficie",
+            }.get(why, f"El {day:%d/%m} no abrió o no figura la Cancha {court} a las {hour}"))
+
+        answer = await site.open_booking(slot)
+        note(f"reserva abierta para Cancha {slot.court}" if answer["next"] else "el sitio no abrió la reserva")
+        if not answer["next"]:
+            return done(False, "DeporYA no dejó reservar: " + (" / ".join(answer["messages"]) or "sin explicación"))
+
+        found = await site.find_partners(partner.split()[0])
+        chosen = pick_partner(found, partner)
+        note("búsqueda: " + (", ".join(p.name for p in found) or "sin resultados"))
+        if chosen is None:
+            return done(False, f"No encontré a {partner} entre los socios")
+        players = await site.choose_partner(chosen)
+        note("jugadores: " + ", ".join(players["players"]))
+        if not any(set(chosen.name.split()) <= set(n.split()) for n in players["players"]):
+            return done(False, f"{chosen.name} no quedó en la reserva"
+                        + "".join(f": {m}" for m in players["messages"][:1]))
+
+        result = await site.confirm()
+        confirm_sent = result["sent"]
+        for m in result["messages"]:
+            note(f"el sitio dice: {m}")
+        if not result["asked"]:
+            return done(False, "Confirmar no abrió la confirmación"
+                        + "".join(f": {m}" for m in result["messages"][:1]))
+        note("Sí enviado")
+
+        # The proof: the slot now shows as booked.
+        after = next((s for s in await site.load_day(day) if s.row == slot.row), None)
+        note(f"después: Cancha {slot.court} {slot.hour} → {after.status_text if after else '?'}")
+        booked = after is not None and after.status == BOOKED
+        message = f"Cancha {slot.court} ({slot.surface.lower()}) el {day:%d/%m/%Y} a las {slot.hour} con {chosen.name.title()}"
+        if why == "substitute":
+            message += f" — la Cancha {court} estaba ocupada, reservé la {slot.court}"
+        if booked:
+            return done(True, message)
+        return done(False, f"Mandé la confirmación pero el horario figura como "
+                    f"«{after.status_text if after else '?'}». Revisá en DeporYA: {message}")
+    except Exception as e:
+        return done(False, f"{type(e).__name__}: {str(e).strip().splitlines()[0][:200] if str(e).strip() else ''}")
     finally:
         await site.http.aclose()
         if traffic_path:
