@@ -747,14 +747,14 @@ class DeporYA:
         r = await self.http.get(url, headers={"Referer": referer})
         self._record(r, started)
         r.raise_for_status()
-        hiddens, fields, _ = parse_page(r.text)
+        # The box shows its title and message as read-only text areas (vTITULO, vMENSAJE),
+        # e.g. "Reserva realizada" / "17/11/26 - 11:00 hs. Jugadores: …" (2026-11-16).
         texts = []
-        for source in (hiddens, fields):
-            for key, value in source.items():
-                if isinstance(value, str) and value.strip() and re.search(r"TITULO|MENSAJE", key.upper()) \
-                        and not key.upper().startswith(("GXHASH", "GX_")) and value.strip() not in texts:
-                    texts.append(re.sub(r"<[^>]+>", " ", html_lib.unescape(value)).strip())
-        return [" ".join(t.split()) for t in texts if t]
+        for m in re.finditer(r"<textarea\b[^>]*\bname=\"(v\w+)\"[^>]*>(.*?)</textarea>", r.text, re.S | re.I):
+            text = " ".join(html_lib.unescape(m.group(2)).split())
+            if text:
+                texts.append(text)
+        return texts
 
 
 def today(tz):
