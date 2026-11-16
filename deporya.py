@@ -522,6 +522,20 @@ class Partner:
     def __repr__(self):
         return f"<{self.name} #{self.id}>"
 
+    @classmethod
+    def known(cls, ids):
+        """A partner whose ids were learned from an earlier search: {"id", "doc", "name"}."""
+        p = cls.__new__(cls)
+        p.row, p.id, p.doc, p.name = None, int(ids["id"]), str(ids["doc"]), str(ids["name"])
+        return p
+
+    def ids(self):
+        return {"id": self.id, "doc": self.doc, "name": self.name}
+
+
+def on_booking(partner, players):
+    return any(set(partner.name.split()) <= set(name.split()) for name in players)
+
 
 def partners_of(page):
     rows = sorted(int(k.rsplit("_", 1)[1]) for k in page.rows if k.startswith("SOCIOID_"))
@@ -597,6 +611,15 @@ class DeporYA:
 
     async def __aexit__(self, *exc):
         await self.http.aclose()
+
+    async def prefetch(self, *names):
+        """Fetch pages' scripts ahead (they say what each event sends), so that the
+        booking screens cost no extra requests once the day opens."""
+        for name in names:
+            if name not in self._js:
+                js = await self.http.get(f"{self.base_url}/{name}.js")
+                js.raise_for_status()
+                self._js[name] = js.text
 
     async def _load(self, url, referer=None):
         url = urljoin(self.base_url + "/", url)
@@ -699,6 +722,13 @@ class DeporYA:
         box does. Returns {"messages": [str], "players": [names], "raw": response}."""
         picked = await self._fire(self.search, "SOCIOFULLNOMBREAPELLIDO.CLICK", row=partner.row,
                                   grid=20, may_be_empty=True)
+        added = await self.add_partner(partner)
+        added["messages"] = messages(picked) + added["messages"]
+        return added
+
+    async def add_partner(self, partner):
+        """Report a partner to the booking screen, as closing the search box does. With a
+        partner whose ids are known this is the whole step: no Buscar, no search."""
         page = self.booking
         page.values.update(vXSOCIOID=partner.id, vXSOCIODOC=partner.doc,
                            vXSOCIOFULLNOMBREAPELLIDO=partner.name)
@@ -706,7 +736,7 @@ class DeporYA:
         players = page.get("vSDTJUGADORES") or []
         if isinstance(players, str):
             players = json.loads(players)
-        return {"messages": messages(picked) + messages(response),
+        return {"messages": messages(response),
                 "players": [p.get("SocioFullNombreApellido", "") for p in players],
                 "raw": response}
 
@@ -801,15 +831,42 @@ async def run_direct_probe(username, password, tz, days_ahead=1, court=None, hou
         return {"success": False, "lines": lines, "screenshots": []}
 
 
+async def put_partner(site, partner, known, note):
+    """Get `partner` onto the booking: directly when their ids are `known`, else (or if the
+    site won't take that) through the search box. Returns (Partner | None, players, how)."""
+    if known:
+        p = Partner.known(known)
+        try:
+            added = await site.add_partner(p)
+            if on_booking(p, added["players"]):
+                note(f"socio agregado sin buscar: {', '.join(added['players'])}")
+                return p, added, "atajo"
+            note("el atajo no agregó al socio" + "".join(f": {m}" for m in added["messages"][:1])
+                 + " — busco")
+        except Exception as e:
+            note(f"el atajo falló ({type(e).__name__}) — busco")
+    found = await site.find_partners(partner.split()[0])
+    note("búsqueda: " + (", ".join(p.name for p in found) or "sin resultados"))
+    chosen = pick_partner(found, partner)
+    if chosen is None:
+        return None, None, "búsqueda"
+    added = await site.choose_partner(chosen)
+    note("jugadores: " + ", ".join(added["players"]))
+    return chosen, added, "búsqueda"
+
+
 async def run_direct_rehearsal(username, password, tz, partner, days_ahead=1, traffic_path=None,
-                               transport=None):
+                               transport=None, known_partner=None):
     """The booking screens without a browser, up to the partner being on the booking, timing
     each step. Never sends Confirmar, so nothing is booked.
 
     Uses the first free slot of the day (like the browser rehearsal). With `traffic_path`,
-    everything sent and received is saved there (credentials masked).
+    everything sent and received is saved there (credentials masked). With `known_partner`
+    (ids from an earlier search) the partner is added without the search box. The result's
+    "partner_ids" are the partner's ids, to remember for next time.
     """
     lines = []
+    learned = None
     site = DeporYA(transport=transport)
 
     async def timed(label, coro):
@@ -822,6 +879,7 @@ async def run_direct_rehearsal(username, password, tz, partner, days_ahead=1, tr
     try:
         await timed("login", site.login(username, password))
         await timed("Días disponibles", site.open_schedule())
+        await timed("scripts de la reserva", site.prefetch("horaactual", "xselsociodatos"))
         day = date.fromordinal(datetime.now(tz).date().toordinal() + days_ahead)
         slots = await timed(f"leer el {day:%d/%m}", site.load_day(day))
         slot = next((s for s in slots if s.free), None)
@@ -834,21 +892,23 @@ async def run_direct_rehearsal(username, password, tz, partner, days_ahead=1, tr
             lines.append("❌ DeporYA no dejó abrir la reserva: "
                          + (" / ".join(answer["messages"]) or "sin explicación"))
             return {"success": False, "lines": lines, "screenshots": []}
-        found = await timed(f"buscar «{partner.split()[0]}»", site.find_partners(partner.split()[0]))
-        lines.append("resultados: " + (", ".join(p.name for p in found) or "ninguno"))
-        chosen = pick_partner(found, partner)
+        t = time.monotonic()
+        chosen, result, how = await put_partner(site, partner, known_partner, lines.append)
+        lines.append(f"socio ({how}): {time.monotonic() - t:.2f}s")
         if chosen is None:
             lines.append(f"❌ No encontré a {partner} entre los resultados")
             return {"success": False, "lines": lines, "screenshots": []}
-        result = await timed(f"elegir a {chosen.name}", site.choose_partner(chosen))
-        lines.append("jugadores en la reserva: " + (", ".join(result["players"]) or "?"))
         for text in result["messages"]:
             lines.append(f"el sitio dice: {text}")
         lines.append(f"total: {time.monotonic() - t0:.2f}s — frené antes de Confirmar")
-        ok = any(set(chosen.name.split()) <= set(name.split()) for name in result["players"])
-        if not ok:
+        ok = on_booking(chosen, result["players"])
+        if ok:
+            learned = chosen.ids()
+            if how == "búsqueda":
+                lines.append("(guardé sus datos: el próximo ensayo prueba agregarlo sin buscar)")
+        else:
             lines.append("⚠️ El socio no quedó en la lista de jugadores")
-        return {"success": ok, "lines": lines, "screenshots": []}
+        return {"success": ok, "lines": lines, "screenshots": [], "partner_ids": learned}
     except Exception as e:
         lines.append(f"❌ {type(e).__name__}: {str(e).strip().splitlines()[0][:200] if str(e).strip() else ''}")
         return {"success": False, "lines": lines, "screenshots": []}
@@ -863,18 +923,20 @@ async def run_direct_rehearsal(username, password, tz, partner, days_ahead=1, tr
 
 async def run_direct_reservation(username, password, tz, court, hour, partner, days_ahead=1,
                                  open_at=None, traffic_path=None, transport=None,
-                                 window=timedelta(seconds=90)):
+                                 window=timedelta(seconds=90), known_partner=None):
     """Book `court` at `hour` with `partner`, `days_ahead` days from today, without a browser.
 
     With `open_at` (08:00 the day before), log in first, then read the day from
     `open_at` on until it opens, one request at a time. Takes the court asked for, or the
     closest-numbered free court on its surface at that hour.
 
-    Returns {"success", "message", "lines", "confirm_sent"}. confirm_sent=True means "Sí"
-    went out: then the booking may exist even if this run could not confirm it, so don't
-    try again blindly.
+    Returns {"success", "message", "lines", "confirm_sent", "partner_ids"}. confirm_sent=True
+    means "Sí" went out: then the booking may exist even if this run could not confirm it,
+    so don't try again blindly. With `known_partner` (ids from an earlier search) the
+    partner is added without the search box; "partner_ids" are theirs, to remember.
     """
     lines, t0 = [], time.monotonic()
+    learned = []
     site = DeporYA(transport=transport)
     confirm_sent = False
 
@@ -884,13 +946,19 @@ async def run_direct_reservation(username, password, tz, court, hour, partner, d
     def done(success, message):
         note(("✅ " if success else "❌ ") + message)
         return {"success": success, "message": message, "lines": lines,
-                "confirm_sent": confirm_sent or site.confirm_sent}
+                "confirm_sent": confirm_sent or site.confirm_sent,
+                "partner_ids": learned[0] if learned else None}
 
     try:
         await site.login(username, password)
         note("login")
         await site.open_schedule()
         note("Días disponibles")
+        try:
+            await site.prefetch("horaactual", "xselsociodatos")
+            note("scripts de la reserva cargados")
+        except Exception as e:
+            note(f"no pude cargar los scripts antes ({type(e).__name__}); se cargan después")
         day = date.fromordinal(datetime.now(tz).date().toordinal() + days_ahead)
 
         if open_at is not None:
@@ -928,16 +996,13 @@ async def run_direct_reservation(username, password, tz, court, hour, partner, d
         if not answer["next"]:
             return done(False, "DeporYA no dejó reservar: " + (" / ".join(answer["messages"]) or "sin explicación"))
 
-        found = await site.find_partners(partner.split()[0])
-        chosen = pick_partner(found, partner)
-        note("búsqueda: " + (", ".join(p.name for p in found) or "sin resultados"))
+        chosen, players, how = await put_partner(site, partner, known_partner, note)
         if chosen is None:
             return done(False, f"No encontré a {partner} entre los socios")
-        players = await site.choose_partner(chosen)
-        note("jugadores: " + ", ".join(players["players"]))
-        if not any(set(chosen.name.split()) <= set(n.split()) for n in players["players"]):
+        if not on_booking(chosen, players["players"]):
             return done(False, f"{chosen.name} no quedó en la reserva"
                         + "".join(f": {m}" for m in players["messages"][:1]))
+        learned.append(chosen.ids())
 
         result = await site.confirm()
         confirm_sent = result["sent"]

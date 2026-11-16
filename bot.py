@@ -112,7 +112,15 @@ def get_user(chat_id: int) -> dict:
         users[key]["partners"] = []
         users[key]["pending"] = []
     users[key].setdefault("pending", [])
+    users[key].setdefault("partner_ids", {})  # partner name (lowercase) → ids from a search
     return users[key]
+
+
+def remember_partner(u: dict, partner: str, ids: dict | None):
+    """Keep a partner's ids from a search, so the next booking can skip the search box."""
+    if ids and u["partner_ids"].get(partner.lower()) != ids:
+        u["partner_ids"][partner.lower()] = ids
+        save_users(users)
 
 
 async def login_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -552,7 +560,9 @@ async def run_direct_rehearsal_job(app: Application, chat_id: int, partner: str,
     log.info("Running browser-free rehearsal for chat %s", chat_id)
     try:
         result = await run_direct_rehearsal(u["tennis_user"], u["tennis_pass"], TZ, partner,
-                                            days_ahead=days_ahead, traffic_path=har_path(shot_dir))
+                                            days_ahead=days_ahead, traffic_path=har_path(shot_dir),
+                                            known_partner=u["partner_ids"].get(partner.lower()))
+        remember_partner(u, partner, result.get("partner_ids"))
     except Exception as e:
         log.exception("Direct rehearsal crashed for chat %s", chat_id)
         result = {"success": False, "lines": [f"❌ {e}"], "screenshots": []}
@@ -780,7 +790,9 @@ async def run_pending_reservation(app: Application, chat_id: int, entry: dict):
                 entry["partner"], days_ahead=days_ahead,
                 open_at=open_at if open_at > datetime.now(TZ) else None,
                 traffic_path=har_path(direct_dir) if RECORD_HAR else None,
+                known_partner=u["partner_ids"].get(entry["partner"].lower()),
             )
+            remember_partner(u, entry["partner"], direct.get("partner_ids"))
         except Exception as e:
             log.exception("Direct reservation crashed for chat %s", chat_id)
             direct = {"success": False, "message": str(e), "lines": [f"❌ {e}"], "confirm_sent": False}

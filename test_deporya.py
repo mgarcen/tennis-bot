@@ -271,6 +271,11 @@ def _search_cases():
     case("the answer to Sí (as recorded): a message popup, then Mis reservas",
          (d.popup_of(booked), d.redirect_of(booked)), ("wpmensaje.aspx?abc", "misreservas.aspx?xyz"))
 
+    kevin = d.Partner.known({"id": "4281", "doc": 19890, "name": "KEVIN MONZON"})
+    case("a remembered partner keeps the ids a search gave, and is found on the booking",
+         (kevin.ids(), d.on_booking(kevin, ["MICHEL GARCEN", "KEVIN MONZON"]), d.on_booking(kevin, ["MICHEL GARCEN"])),
+         ({"id": 4281, "doc": "19890", "name": "KEVIN MONZON"}, True, False))
+
 
 _search_cases()
 case("event names with and without quotes are both read",
