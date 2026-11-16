@@ -266,6 +266,11 @@ def _search_cases():
     case("the final confirmation says Yes, and prices go as the page's script reads them",
          booking.body("DVELOP_CONFIRMPANEL_ENTER.CLOSE")["parms"], ["Yes", 0, 1250.5])
 
+    booked = {"gxCommands": [{"popup": ["wpmensaje.aspx?abc", 1, 0, 0, 0, 0, 0, [], ["AV22Titulo"], ""]},
+                             {"redirect": {"url": "misreservas.aspx?xyz", "forceDisableFrm": 1}}]}
+    case("the answer to Sí (as recorded): a message popup, then Mis reservas",
+         (d.popup_of(booked), d.redirect_of(booked)), ("wpmensaje.aspx?abc", "misreservas.aspx?xyz"))
+
 
 _search_cases()
 case("event names with and without quotes are both read",

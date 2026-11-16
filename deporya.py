@@ -449,11 +449,22 @@ def messages(response):
 
 
 def redirect_of(response):
+    """Where the site sends the page next (a redirect first, else a popup it opens)."""
+    commands = [c for c in response.get("gxCommands") or [] if isinstance(c, dict)]
+    for command in commands:
+        if isinstance(command.get("redirect"), dict):
+            return command["redirect"].get("url")
+    return popup_of(response)
+
+
+def popup_of(response):
+    """The page a response opens in a popup. (It comes as a list: [url, ...].)"""
     for command in response.get("gxCommands") or []:
-        if "redirect" in command:
-            return command["redirect"]["url"]
-        if "popup" in command:
-            return command["popup"].get("url")
+        popup = command.get("popup") if isinstance(command, dict) else None
+        if isinstance(popup, list) and popup:
+            return popup[0]
+        if isinstance(popup, dict):
+            return popup.get("url")
     return None
 
 
@@ -565,6 +576,7 @@ class DeporYA:
         self.schedule = None   # the "Días disponibles" page, once opened
         self.booking = None    # the booking screen of a slot, once one was accepted
         self.search = None     # its partner search box, once opened
+        self.confirm_sent = False  # True once "Sí" has left: the booking may exist
         self.traffic = []      # every request and answer, for write_traffic()
 
     def _record(self, r, started):
@@ -706,15 +718,43 @@ class DeporYA:
         "¿Confirma la reserva?" dialog (then nothing was sent and "messages" says why).
         """
         page = self.booking
+        self.confirm_sent = False
         asked = await self._fire(page, "ENTER", may_be_empty=True)
         notes = messages(asked)
         if "DVELOP_CONFIRMPANEL_ENTER" not in json.dumps(asked):
             return {"asked": False, "sent": False, "messages": notes,
                     "next": redirect_of(asked), "raw": asked}
         page.hiddens["DVELOP_CONFIRMPANEL_ENTER_Result"] = "Yes"      # the "Sí" button
+        # From here on the booking may exist, whatever happens to this request's answer.
+        self.confirm_sent = True
         done = await self._fire(page, "DVELOP_CONFIRMPANEL_ENTER.CLOSE", may_be_empty=True)
-        return {"asked": True, "sent": True, "messages": notes + messages(done),
+        notes += messages(done)
+        # The site answers a booking with a message box (wpmensaje) and a move to
+        # "Mis reservas" (seen 2026-11-16). Read the box's text to report it.
+        box = popup_of(done)
+        if box:
+            try:
+                notes += await self._popup_text(box, referer=page.url)
+            except Exception as e:
+                notes.append(f"(no pude leer el mensaje del sitio: {type(e).__name__})")
+        return {"asked": True, "sent": True, "messages": notes,
                 "next": redirect_of(done), "raw": done}
+
+    async def _popup_text(self, url, referer):
+        """The texts a message popup shows (its title and message values)."""
+        url = urljoin(self.base_url + "/", url + ",gxPopupLevel%3D0%3B")
+        started = datetime.now(timezone.utc)
+        r = await self.http.get(url, headers={"Referer": referer})
+        self._record(r, started)
+        r.raise_for_status()
+        hiddens, fields, _ = parse_page(r.text)
+        texts = []
+        for source in (hiddens, fields):
+            for key, value in source.items():
+                if isinstance(value, str) and value.strip() and re.search(r"TITULO|MENSAJE", key.upper()) \
+                        and not key.upper().startswith(("GXHASH", "GX_")) and value.strip() not in texts:
+                    texts.append(re.sub(r"<[^>]+>", " ", html_lib.unescape(value)).strip())
+        return [" ".join(t.split()) for t in texts if t]
 
 
 def today(tz):
@@ -843,7 +883,8 @@ async def run_direct_reservation(username, password, tz, court, hour, partner, d
 
     def done(success, message):
         note(("✅ " if success else "❌ ") + message)
-        return {"success": success, "message": message, "lines": lines, "confirm_sent": confirm_sent}
+        return {"success": success, "message": message, "lines": lines,
+                "confirm_sent": confirm_sent or site.confirm_sent}
 
     try:
         await site.login(username, password)
@@ -905,16 +946,21 @@ async def run_direct_reservation(username, password, tz, court, hour, partner, d
         if not result["asked"]:
             return done(False, "Confirmar no abrió la confirmación"
                         + "".join(f": {m}" for m in result["messages"][:1]))
-        note("Sí enviado")
+        to_list = "misreservas" in (result["next"] or "").lower()
+        note("Sí enviado" + (" → el sitio pasó a Mis reservas" if to_list else ""))
 
-        # The proof: the slot now shows as booked.
-        after = next((s for s in await site.load_day(day) if s.row == slot.row), None)
-        note(f"después: Cancha {slot.court} {slot.hour} → {after.status_text if after else '?'}")
-        booked = after is not None and after.status == BOOKED
         message = f"Cancha {slot.court} ({slot.surface.lower()}) el {day:%d/%m/%Y} a las {slot.hour} con {chosen.name.title()}"
         if why == "substitute":
             message += f" — la Cancha {court} estaba ocupada, reservé la {slot.court}"
-        if booked:
+        # The proof: the slot now shows as booked.
+        try:
+            after = next((s for s in await site.load_day(day) if s.row == slot.row), None)
+        except Exception as e:
+            after = None
+            note(f"no pude releer el día: {type(e).__name__}")
+        if after is not None:
+            note(f"después: Cancha {slot.court} {slot.hour} → {after.status_text}")
+        if (after is not None and after.status == BOOKED) or (after is None and to_list):
             return done(True, message)
         return done(False, f"Mandé la confirmación pero el horario figura como "
                     f"«{after.status_text if after else '?'}». Revisá en DeporYA: {message}")
