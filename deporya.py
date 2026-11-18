@@ -573,6 +573,33 @@ def write_traffic(path, entries, lines, secrets):
         f.write(text)
 
 
+def decide(slots, court, hour, all_courts, last_chance=False):
+    """While the day is opening: (slot, why, final). final=False means read again.
+
+    At 08:00 the site can answer with a day it is still building: on 2026-11-18 the first
+    read had 49 of 98 rows (Cancha 5 stopped at 14:00, 6-8 missing), and taking "no row"
+    for "taken" lost the booking. So a court counts as taken only when its row is there
+    and booked, and the substitute search waits until every court has its row at that
+    hour. `all_courts` are the club's courts (from the schedule's court list).
+    `last_chance` takes the best there is.
+    """
+    at_hour = {s.court for s in slots if s.hour == hour}
+    complete = bool(all_courts) and set(all_courts) <= at_hour
+    slot, why = pick_slot(slots, court, hour)
+    wanted = next((s for s in slots if s.court == court and s.hour == hour), None)
+    if why == "free":
+        return slot, why, True
+    if wanted is None and not complete:
+        if last_chance:
+            return slot, (why if slot else "not-yet"), True
+        return None, "not-yet", False              # its row isn't there yet
+    if why == "substitute":
+        return slot, why, True                     # booked, and a free one exists now
+    if complete or last_chance:
+        return None, why, True
+    return None, "not-yet", False                  # others at that hour still coming
+
+
 # ── The client ───────────────────────────────────────────────────────────────────
 
 class DeporYA:
@@ -968,7 +995,9 @@ async def run_direct_reservation(username, password, tz, court, hour, partner, d
                 await asyncio.sleep(wait)
         deadline = datetime.now(tz) + (window if open_at is not None else timedelta(seconds=20))
 
-        tries, slot, why = 0, None, "missing"
+        all_courts = [int(v) for v, _ in (site.schedule.combos.get("vCANCHAID") or {}).get("v", [])
+                      if str(v).strip().isdigit() and int(v) > 0]
+        tries, slot, why, last_rows = 0, None, "missing", None
         while True:
             tries += 1
             try:
@@ -976,11 +1005,15 @@ async def run_direct_reservation(username, password, tz, court, hour, partner, d
             except SiteError as e:
                 slots = []
                 note(f"lectura {tries}: {e}")
+            last_chance = datetime.now(tz) >= deadline
             if slots:
-                slot, why = pick_slot(slots, int(court), hour)
-                if slot is not None or why in ("taken", "full"):
+                slot, why, final = decide(slots, int(court), hour, all_courts, last_chance)
+                if final:
                     break
-            if datetime.now(tz) >= deadline:
+                if len(slots) != last_rows:
+                    note(f"lectura {tries}: el día está abriendo ({len(slots)} horarios), releo")
+                    last_rows = len(slots)
+            elif last_chance:
                 break
             await asyncio.sleep(0.2)
         note(f"día leído ({tries} lectura{'s' if tries > 1 else ''}): "
@@ -989,6 +1022,7 @@ async def run_direct_reservation(username, password, tz, court, hour, partner, d
             return done(False, {
                 "taken": f"Cancha {court} a las {hour} ya está reservada y no hay otra libre en esa superficie",
                 "full": f"Cancha {court} a las {hour} no está libre y no hay otra libre en esa superficie",
+                "not-yet": f"El {day:%d/%m} no terminó de abrir: la Cancha {court} a las {hour} nunca apareció",
             }.get(why, f"El {day:%d/%m} no abrió o no figura la Cancha {court} a las {hour}"))
 
         answer = await site.open_booking(slot)

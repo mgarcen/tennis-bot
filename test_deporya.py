@@ -276,6 +276,26 @@ def _search_cases():
          (kevin.ids(), d.on_booking(kevin, ["MICHEL GARCEN", "KEVIN MONZON"]), d.on_booking(kevin, ["MICHEL GARCEN"])),
          ({"id": 4281, "doc": "19890", "name": "KEVIN MONZON"}, True, False))
 
+    def row(n, court, hour, status, surface):
+        return d.Slot(n, {"CanchaId": court, "TipoCanchaDesc": surface, "StrHora": hour,
+                          "EstadoHoraId": status, "EstadoHoraDesc": ""})
+    clay = [5, 6, 7, 8]
+    half = [row(1, 5, "14:00", 1, "LADRILLO")]                      # as at 08:00 on 2026-11-18
+    full = [row(1, 5, "19:00", 2, "LADRILLO"), row(2, 6, "19:00", 1, "LADRILLO"),
+            row(3, 7, "19:00", 2, "LADRILLO"), row(4, 8, "19:00", 5, "LADRILLO")]
+    taken_partly = full[:1] + full[2:3]                             # 5 booked, 6 and 8 not there yet
+    case("a half-built day: the court's missing row means read again, not taken",
+         d.decide(half, 5, "19:00", clay)[1:], ("not-yet", False))
+    case("booked, others at that hour still coming: read again",
+         d.decide(taken_partly, 5, "19:00", clay)[1:], ("not-yet", False))
+    case("booked, a free one on its surface: take it",
+         (d.decide(full, 5, "19:00", clay)[0].court, d.decide(full, 5, "19:00", clay)[1:]), (6, ("substitute", True)))
+    case("booked and every court there and none free: give up",
+         d.decide([row(2, 6, "19:00", 2, "LADRILLO") if r.court == 6 else r for r in full], 5, "19:00", clay)[1:],
+         ("full", True))
+    case("time's up on a half-built day: stop, and say it never appeared",
+         d.decide(half, 5, "19:00", clay, last_chance=True)[1:], ("not-yet", True))
+
 
 _search_cases()
 case("event names with and without quotes are both read",
